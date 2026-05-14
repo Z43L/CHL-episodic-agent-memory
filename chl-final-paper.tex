@@ -1,0 +1,567 @@
+\documentclass[11pt]{article}
+\usepackage[margin=0.72in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish,es-tabla]{babel}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{chlblue}{HTML}{1F77B4}
+\definecolor{chlgreen}{HTML}{2CA02C}
+\definecolor{chlamber}{HTML}{FFB000}
+\definecolor{chlred}{HTML}{D62728}
+\definecolor{chldark}{HTML}{202332}
+\definecolor{chlmuted}{HTML}{5E6678}
+\definecolor{codebg}{HTML}{F6F8FA}
+
+\hypersetup{
+  pdftitle={CHL: memoria de agente local-first, MCP-native y aprendible},
+  pdfauthor={Documento técnico de desarrollo},
+  pdfsubject={Memoria semántica ligera, MCP, LSH, Hypervector, HDC, VSA},
+  pdfkeywords={CHL, MCP, memoria semántica, SimHash, LSH, HDC, VSA, benchmark}
+}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.52\baselineskip}
+\emergencystretch=2em
+\setlist[itemize]{leftmargin=1.35em,itemsep=0.15em,topsep=0.2em}
+\setlist[enumerate]{leftmargin=1.55em,itemsep=0.15em,topsep=0.2em}
+\renewcommand{\arraystretch}{1.15}
+
+\lstdefinestyle{chlcode}{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{chlblue}\bfseries,
+  commentstyle=\color{chlmuted},
+  stringstyle=\color{chlgreen!70!black},
+  numbers=left,
+  numberstyle=\tiny\color{chlmuted},
+  stepnumber=1,
+  numbersep=8pt,
+  frame=single,
+  framerule=0.3pt,
+  rulecolor=\color{chlmuted!35},
+  breaklines=true,
+  tabsize=2,
+  showstringspaces=false,
+  captionpos=b
+}
+\lstset{style=chlcode}
+
+\newcommand{\CHL}{\textsc{CHL}}
+\newcommand{\LSH}{\textsc{LSH}}
+\newcommand{\HDC}{\textsc{HDC}}
+\newcommand{\VSA}{\textsc{VSA}}
+\newcommand{\MCP}{\textsc{MCP}}
+\newcommand{\simh}{\operatorname{sim}_{\mathrm H}}
+\newcommand{\hd}{d_{\mathrm H}}
+\newcommand{\popcnt}{\operatorname{popcnt}}
+\newcommand{\xor}{\oplus}
+\newcommand{\bits}{\{0,1\}}
+\newcommand{\pmone}{\{-1,+1\}}
+
+\title{\vspace{-1.3em}\textbf{\CHL{}: memoria de agente local-first, \MCP{}-native y aprendible}\\
+\Large Arquitectura final de memoria semántica ligera para IA}
+\author{Documento técnico de desarrollo\\Adaptado al estado final del sistema}
+\date{Mayo de 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Este documento describe la versión final de \CHL{} como una memoria de agente local-first, \MCP{}-native, persistente y aprendible. La idea central sigue siendo usar firmas binarias sensibles a la localidad para recuperar vecinos semánticos, pero el sistema final ya no depende de un ``hash'' criptográfico como representación de significado. En su lugar, combina: normalización y canonicalización, un lexicón aprendido de conceptos y frases, firmas semánticas, hipervectores, persistencia en disco, journal incremental, backup binario comprimido y exposición por HTTP y \MCP{}.
+
+La implementación real se reparte entre \texttt{src/memory.js}, \texttt{src/native.js}, \texttt{native/chl\_addon.cc}, \texttt{src/concepts.js}, \texttt{src/server.js} y \texttt{src/mcp.js}. El servidor HTTP expone inspección y exportación del estado y del lexicón; el servidor \MCP{} expone herramientas y recursos para que un LLM lea, consulte y actúe sobre la memoria. Los benchmarks reproducibles en \texttt{scripts/evaluate.js} muestran dos regímenes de interés: en \texttt{bench:large} con 12\,000 documentos y 6\,000 consultas, \texttt{chl-native} alcanza recall@1 de 0.9392 y p95 de 1255.92\,\(\mu s\); en \texttt{bench:huge} con 50\,000 documentos y 20\,000 consultas, el recall@1 global queda en 0.80925 y la latencia p95 en 863.54\,\(\mu s\), con una degradación esperable de paráfrasis al escalar.
+\\
+El resultado posiciona a \CHL{} no como una base vectorial genérica, sino como una memoria conversacional viva para agentes: inspectable, exportable, persistente y con vocabulario aprendido entre sesiones.
+\end{abstract}
+
+\textbf{Palabras clave:} memoria de agente, \MCP{}, \LSH{}, SimHash, \HDC{}, \VSA{}, lexicón aprendido, distancia de Hamming, memoria semántica ligera.
+
+\tableofcontents
+\newpage
+
+\section{Introducción}
+
+El objetivo de \CHL{} no es sustituir a los Transformers ni competir como base de datos vectorial universal. El objetivo es más concreto: ofrecer a un agente una memoria local que pueda recordar, inspeccionar, exportar y reutilizar conocimiento con baja latencia y sin infraestructura pesada.
+
+La motivación técnica es doble. Por un lado, los hashes criptográficos destruyen similitud: son excelentes para integridad, pero malos para semántica. Por otro lado, las memorias densas o vectoriales generalistas suelen ser potentes, pero no siempre son la solución más simple cuando lo que se necesita es memoria viva de agente, explicable y conectada al modelo por \MCP{}.
+
+\CHL{} resuelve esa tensión con una arquitectura híbrida:
+\begin{itemize}
+  \item firmas semánticas compactas para direccionamiento rápido;
+  \item hipervectores para composición y re-ranking;
+  \item lexicón aprendido para paráfrasis y frases recurrentes;
+  \item persistencia local, journal y backup binario;
+  \item API HTTP y \MCP{} para inspección y control.
+\end{itemize}
+
+\section{Estado final del sistema}
+
+La implementación final ya existe en el repositorio y se divide en módulos concretos:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{0.25\linewidth}p{0.66\linewidth}}
+\toprule
+\textbf{Archivo} & \textbf{Responsabilidad real} \\
+\midrule
+\texttt{src/memory.js} & Motor JS de memoria asociativa, representaciones múltiples, scoring y fallback funcional. \\
+\texttt{native/chl\_addon.cc} & Addon nativo C++ con hash semántico, búsqueda rápida, persistencia y métricas. \\
+\texttt{src/native.js} & Wrapper de alto nivel, fallback JS, persistencia de journal y sidecars del lexicón. \\
+\texttt{src/concepts.js} & Canonicalización, lexicón de conceptos y frases, aprendizaje y serialización TSV. \\
+\texttt{src/server.js} & API HTTP para estado, backup, restore, lexicón e inspección. \\
+\texttt{src/mcp.js} & Herramientas y recursos \MCP{} para memoria, backup, restore, lexicón y estado. \\
+\texttt{scripts/evaluate.js} & Benchmarks reproducibles: small, large y huge. \\
+\texttt{test/chl.test.js} & Tests de recall, persistencia, HTTP, \MCP{} y lexicón. \\
+\bottomrule
+\end{tabular}
+\caption{Mapa funcional del sistema final.}
+\end{table}
+
+\subsection{Capas funcionales}
+
+\begin{enumerate}
+  \item \textbf{Memoria local:} entradas, snapshot, journal, buckets, backup binario.
+  \item \textbf{Memoria aprendida:} conceptos y frases persistentes en \texttt{memory.concepts.tsv} y \texttt{memory.phrases.tsv}.
+  \item \textbf{Interfaz de agente:} herramientas y recursos \MCP{} para acceso directo desde el LLM.
+  \item \textbf{Interfaz de inspección:} endpoints HTTP para consultar estado, entradas, backup y lexicón.
+\end{enumerate}
+
+\subsection{Perfil real de ejecución}
+
+El runtime soporta dos presets de producto:
+\begin{itemize}
+  \item \texttt{default}: 128 bits, 32 band bits, 256 dimensiones hipervectoriales, 4096 entradas máximas.
+  \item \texttt{large}: 128 bits, 32 band bits, 256 dimensiones hipervectoriales, 20\,000 entradas máximas y 96 candidatos máximos.
+\end{itemize}
+
+El benchmark \texttt{bench:huge} no introduce un perfil nuevo de runtime: usa el preset \texttt{large} como estrés sobre un corpus de 50\,000 documentos.
+
+\section{Fundamentos técnicos}
+
+\subsection{Por qué no usar un hash criptográfico como semántica}
+
+Un hash criptográfico ofrece una propiedad opuesta a la que necesitamos: entradas parecidas producen salidas no correlacionadas. Eso es correcto para integridad, pero incorrecto para memoria semántica. En \CHL{}, el hash útil debe preservar vecindad de forma probabilística.
+
+\subsection{Locality-Sensitive Hashing}
+
+Una familia \(\mathcal{H}\) es sensible a localidad si entradas cercanas colisionan con mayor probabilidad que entradas lejanas:
+\[
+\Pr_{h \sim \mathcal{H}}[h(x)=h(y)] \ge p_1 \quad \text{si } d(x,y)\le r,
+\]
+\[
+\Pr_{h \sim \mathcal{H}}[h(x)=h(y)] \le p_2 \quad \text{si } d(x,y)\ge cr,
+\]
+con \(p_1 > p_2\) y \(c>1\). Esta es la base conceptual de la recuperación por buckets en \CHL{}.
+
+\subsection{SimHash}
+
+En SimHash, cada bit se define por el signo de una proyección:
+\[
+h_i(x)=\mathbb{1}[\langle r_i,\phi(x)\rangle \ge 0].
+\]
+La distancia de Hamming se calcula con XOR y popcount:
+\[
+\hd(a,b)=\popcnt(a \xor b).
+\]
+La similitud binaria puede expresarse como:
+\[
+\simh(a,b)=1-\frac{\hd(a,b)}{m}.
+\]
+
+\subsection{HDC y VSA}
+
+\HDC{} y \VSA{} aportan las operaciones de composición:
+\begin{itemize}
+  \item \textbf{binding}: asociación de roles y valores;
+  \item \textbf{bundling}: superposición de múltiples señales;
+  \item \textbf{permutación}: codificación de orden y contexto temporal;
+  \item \textbf{cleanup}: limpieza por prototipo o memoria asociativa.
+\end{itemize}
+
+La implementación final no promete que un hash aislado ``contenga conocimiento''; el conocimiento aparece al combinar firma, hipervector, payload, lexicón aprendido y memoria recuperable.
+
+\section{Arquitectura de memoria}
+
+\subsection{Qué guarda cada entrada}
+
+Cada entrada almacenada por el sistema puede contener:
+\begin{itemize}
+  \item texto original;
+  \item representaciones normalizadas y canonicalizadas;
+  \item firma semántica compacta;
+  \item hipervector;
+  \item payload recuperable;
+  \item metadata como calidad, timestamps y contador de acceso;
+  \item relaciones o información estructurada cuando el payload lo permita.
+\end{itemize}
+
+\subsection{Scoring final}
+
+El ranking recupera candidatos a partir de la firma semántica y los reordena con señales de similitud, hipervector, concepto, recencia, calidad y negación. La forma conceptual del score es:
+\[
+score(q,e)=\lambda_h \, sim_h + \lambda_v \, sim_v + \lambda_c \, sim_c + \lambda_q \, quality + \lambda_r \, recency + \lambda_n \, negation.
+\]
+
+La implementación está repartida entre el fallback JS y el addon nativo para mantener comportamiento alineado.
+
+\subsection{Lexicón aprendido}
+
+El sistema final añadió una capa lateral de aprendizaje: un lexicón persistente de conceptos y frases. Esta capa vive en \texttt{src/concepts.js}, se escribe como TSV y se carga desde las variables de entorno:
+\begin{itemize}
+  \item \texttt{CHL\_CONCEPTS\_PATH}
+  \item \texttt{CHL\_PHRASES\_PATH}
+\end{itemize}
+
+En la práctica, esto permite que un LLM o una integración externa reutilice el vocabulario aprendido entre sesiones sin reconstruirlo desde cero.
+
+\subsection{Persistencia}
+
+La persistencia se resuelve en tres niveles:
+\begin{enumerate}
+  \item \textbf{journal incremental}: eventos de \texttt{remember} y \texttt{learn};
+  \item \textbf{backup binario}: archivo comprimido con cabecera \texttt{CHLB} y compresión \texttt{deflate};
+  \item \textbf{sidecars del lexicón}: TSV para conceptos y frases.
+\end{enumerate}
+
+\section{Interfaz HTTP}
+
+El servidor HTTP expone operaciones de inspección, exportación y restauración. Los endpoints reales son:
+
+\begin{longtable}{p{0.28\linewidth}p{0.62\linewidth}}
+\toprule
+\textbf{Endpoint} & \textbf{Función} \\
+\midrule
+\texttt{GET /health} & Estado del servidor con snapshot. \\
+\texttt{GET /snapshot} & Snapshot actual de la memoria. \\
+\texttt{GET /profile} & Perfil activo (\texttt{default} o \texttt{large}). \\
+\texttt{GET /state} & Estado completo, incluyendo entradas, bucket stats y journal. \\
+\texttt{GET /entries} & Lista completa de entradas. \\
+\texttt{GET /journal} & Journal de mutaciones. \\
+\texttt{GET /backup} & Backup JSON compatible. \\
+\texttt{GET /backup.bin} & Backup binario comprimido. \\
+\texttt{GET /lexicon} & Lexicón aprendido en JSON con conteos y rutas. \\
+\texttt{GET /lexicon.concepts.tsv} & Exportación manual de conceptos. \\
+\texttt{GET /lexicon.phrases.tsv} & Exportación manual de frases. \\
+\texttt{GET /lexicon.tsv} & Exportación combinada para inspección manual. \\
+\texttt{POST /remember} & Inserta memoria. \\
+\texttt{POST /recall} & Consulta vecinos. \\
+\texttt{POST /infer} & Inferencia de mejor respuesta. \\
+\texttt{POST /learn} & Aplica feedback. \\
+\texttt{POST /restore} & Restaura backup JSON. \\
+\texttt{POST /restore.bin} & Restaura backup binario. \\
+\bottomrule
+\caption{API HTTP real del sistema.}
+\end{longtable}
+
+\section{Interfaz \MCP{}}
+
+El diseño \MCP{} es central en el resultado final porque el agente puede acceder a la memoria como herramientas y recursos estándar. Esto encaja con la idea oficial de \MCP{}: exponer recursos para aportar contexto y herramientas para ejecutar acciones controladas \cite{mcpResources,mcpTools}.
+
+\subsection{Herramientas expuestas}
+
+\begin{longtable}{p{0.28\linewidth}p{0.62\linewidth}}
+\toprule
+\textbf{Tool} & \textbf{Función} \\
+\midrule
+\texttt{chl\_remember} & Guardar memoria. \\
+\texttt{chl\_recall} & Recuperar candidatos. \\
+\texttt{chl\_infer} & Inferir la mejor respuesta. \\
+\texttt{chl\_learn} & Aplicar feedback. \\
+\texttt{chl\_backup} & Exportar backup JSON. \\
+\texttt{chl\_backup\_binary} & Exportar backup binario en base64. \\
+\texttt{chl\_restore} & Restaurar backup JSON. \\
+\texttt{chl\_restore\_binary} & Restaurar backup binario. \\
+\texttt{chl\_snapshot} & Inspeccionar snapshot. \\
+\texttt{chl\_profile} & Consultar perfil activo. \\
+\texttt{chl\_state} & Ver estado completo. \\
+\texttt{chl\_entries} & Ver entradas completas. \\
+\texttt{chl\_journal} & Ver journal. \\
+\texttt{chl\_bucket\_stats} & Ver estadísticas de buckets. \\
+\texttt{chl\_clear} & Vaciar memoria. \\
+\texttt{chl\_lexicon} & Inspeccionar lexicón aprendido. \\
+\texttt{chl\_lexicon\_export} & Exportar lexicón en formato TSV para reutilización manual. \\
+\bottomrule
+\caption{Herramientas \MCP{} reales de la implementación.}
+\end{longtable}
+
+\subsection{Recursos expuestos}
+
+\begin{longtable}{p{0.28\linewidth}p{0.62\linewidth}}
+\toprule
+\textbf{Resource URI} & \textbf{Contenido} \\
+\midrule
+\texttt{chl://memory} & Estado completo de memoria. \\
+\texttt{chl://profile} & Perfil activo. \\
+\texttt{chl://state} & Estado, entradas, bucket stats y journal. \\
+\texttt{chl://entries} & Entradas completas. \\
+\texttt{chl://journal} & Journal. \\
+\texttt{chl://backup} & Backup JSON. \\
+\texttt{chl://backup.bin} & Backup binario codificado en base64. \\
+\texttt{chl://lexicon} & Lexicón aprendido en JSON. \\
+\texttt{chl://lexicon.concepts} & TSV de conceptos. \\
+\texttt{chl://lexicon.phrases} & TSV de frases. \\
+\texttt{chl://lexicon.tsv} & Exportación TSV combinada. \\
+\bottomrule
+\caption{Recursos \MCP{} reales de la implementación.}
+\end{longtable}
+
+\section{Backup y restauración}
+
+El backup binario usa una estructura compacta con cabecera y compresión \texttt{deflate}. La restauración reconstruye la memoria y, si el backup contiene lexicón, vuelve a escribir los sidecars correspondientes. Esto permite reinicios limpios y reutilización entre sesiones.
+
+La serialización de lexicón también es manualmente exportable en TSV para inspección, sincronización o despliegue en otra instancia.
+
+\section{Implementación nativa y fallback}
+
+El addon nativo (\texttt{native/chl\_addon.cc}) implementa el camino de alto rendimiento. El wrapper \texttt{src/native.js} detecta si el binding está disponible y, si no, cae al motor JS. Esa decisión hace que el sistema sea portable durante desarrollo y de bajo riesgo durante despliegue.
+
+\begin{lstlisting}[language=C++,caption={Esquema conceptual del motor en el addon nativo.}]
+class ChlEngine {
+public:
+    uint32_t add(std::string_view text, Metadata meta);
+    std::vector<Result> search(std::string_view query, size_t k);
+    void reward(uint32_t query_id, uint32_t entry_id, float value);
+    void compact();
+};
+\end{lstlisting}
+
+La implementación prioriza:
+\begin{itemize}
+  \item \texttt{popcount} nativo;
+  \item datos contiguos;
+  \item menor asignación en el camino caliente;
+  \item índices compactos;
+  \item determinismo por semilla.
+\end{itemize}
+
+\section{Benchmarks reales}
+
+Los benchmarks están definidos en \texttt{scripts/evaluate.js}. El modo \texttt{large} usa 12\,000 documentos y 6\,000 consultas. El modo \texttt{huge} usa 50\,000 documentos y 20\,000 consultas, pero sigue corriendo sobre el preset \texttt{large} del runtime. Los números siguientes son los últimos resultados reportados por el script.
+
+\subsection{Benchmark large}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrr}
+\toprule
+\textbf{Métrica} & \textbf{chl-native} & \textbf{chl-js} \\
+\midrule
+docs & 12\,000 & 12\,000 \\
+queries & 6\,000 & 6\,000 \\
+learnedConcepts & 16 & 16 \\
+learnedPhrases & 18 & 18 \\
+loadMs & 4\,451.15 & 3\,571.75 \\
+recall@1 & 0.93917 & 0.93917 \\
+recall@3 & 0.93983 & 0.93983 \\
+mrr & 0.93950 & 0.93950 \\
+medianLatencyUs & 452.21 & 453.90 \\
+p95LatencyUs & 1\,255.92 & 1\,329.83 \\
+collisionBuckets & 1\,672 & 1\,672 \\
+maxBucketSize & 11 & 11 \\
+\bottomrule
+\end{tabular}
+\caption{Resultado del benchmark \texttt{bench:large}.}
+\end{table}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lr}
+\toprule
+\textbf{Categoría} & \textbf{recall@1} \\
+\midrule
+large-positive & 0.93438 \\
+large-paraphrase & 0.93286 \\
+large-negation & 0.98351 \\
+\bottomrule
+\end{tabular}
+\caption{Desglose por categoría del benchmark large.}
+\end{table}
+
+\subsection{Benchmark huge}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrr}
+\toprule
+\textbf{Métrica} & \textbf{chl-native} & \textbf{chl-js} \\
+\midrule
+docs & 50\,000 & 50\,000 \\
+queries & 20\,000 & 20\,000 \\
+learnedConcepts & 60 & 60 \\
+learnedPhrases & 66 & 66 \\
+loadMs & 123\,221.24 & 108\,347.83 \\
+recall@1 & 0.80925 & 0.80905 \\
+recall@3 & 0.80960 & 0.80960 \\
+mrr & 0.80943 & 0.80933 \\
+medianLatencyUs & 292.75 & 316.77 \\
+p95LatencyUs & 863.54 & 948.79 \\
+collisionBuckets & 2\,789 & 2\,789 \\
+maxBucketSize & 9 & 9 \\
+\bottomrule
+\end{tabular}
+\caption{Resultado del benchmark \texttt{bench:huge}.}
+\end{table}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrp{0.55\linewidth}}
+\toprule
+\textbf{Categoría} & \textbf{recall@1} & \textbf{Lectura} \\
+\midrule
+large-positive & 0.83913 & Buen comportamiento en consultas afirmativas directas. \\
+large-paraphrase & 0.76454 & La paráfrasis sigue funcionando, pero ya muestra degradación al escalar. \\
+large-negation & 0.86859 & La negación explícita se mantiene robusta. \\
+\bottomrule
+\end{tabular}
+\caption{Desglose por categoría del benchmark huge.}
+\end{table}
+
+\subsection{Lectura de ingeniería}
+
+Los números de los benchmarks dejan cuatro conclusiones realistas:
+\begin{enumerate}
+  \item La consulta es rápida incluso con decenas de miles de entradas.
+  \item La carga inicial es el cuello de botella principal en 50k.
+  \item La negación está bien modelada como señal explícita.
+  \item La paráfrasis es la zona más sensible al crecimiento del corpus.
+\end{enumerate}
+
+\section{Comparación con alternativas de mercado}
+
+\CHL{} no pretende reemplazar a Weaviate, Pinecone o Redis como motor universal de retrieval. La comparación correcta es de caso de uso.
+
+\begin{table}[p]
+\centering
+\small
+\begin{tabular}{p{0.17\linewidth}p{0.19\linewidth}p{0.19\linewidth}p{0.19\linewidth}p{0.19\linewidth}}
+\toprule
+\textbf{Criterio} & \textbf{CHL} & \textbf{Weaviate} & \textbf{Pinecone} & \textbf{Redis} \\
+\midrule
+Memoria de agente & Muy fuerte; conversacional y \MCP{}-native & Search generalista & Retrieval de producción & Infraestructura de datos \\
+\MCP{} nativo & Sí & No & No & No \\
+Explicabilidad & Alta: state, journal, backup, buckets y lexicón & Media & Media-baja & Media \\
+Paráfrasis & Fuerte con lexicón aprendido & Buena con hybrid search & Buena con dense+sparse & Buena con vector + filtros \\
+Negación & Señal explícita & Depende del ranking & Depende del esquema & Depende del índice \\
+Local-first & Sí & Posible & Normalmente gestionado & Local o gestionado \\
+Persistencia & Journal, backup y sidecars & Base de datos & Servicio & Infraestructura \\
+Escala grande & Memoria local; no foco principal & Muy fuerte & Muy fuerte & Muy fuerte \\
+Filtros/schema & Básico a medio & Muy fuerte & Fuerte & Muy fuerte \\
+Coste operativo & Bajo & Medio/alto & Medio/alto & Medio \\
+Mejor uso & Agente personal/producto & Búsqueda híbrida & RAG de producción & Search + cache + datos \\
+\bottomrule
+\end{tabular}
+\caption{Comparación resumida con alternativas de mercado.}
+\end{table}
+
+La clave es simple: si el problema es memoria conversacional local e inspeccionable, \CHL{} tiene una ventaja clara. Si el problema es retrieval documental de gran escala, las plataformas generalistas siguen siendo superiores.
+
+\section{Limitaciones reales}
+
+\begin{itemize}
+  \item \textbf{No hay contexto infinito:} la memoria crece, pero el coste de carga y compactación existe.
+  \item \textbf{La paráfrasis cae al escalar:} el benchmark de 50k muestra degradación frente a 12k.
+  \item \textbf{El modelo no reemplaza comprensión profunda:} la codificación de características sigue siendo decisiva.
+  \item \textbf{La similitud filtra información:} \LSH{} no es privacidad.
+\end{itemize}
+
+\section{Conclusión}
+
+El resultado final de \CHL{} es una memoria de agente local-first, \MCP{}-native, persistente, aprendible y explicable. El sistema ya no está en fase de idea: existe como implementación en C++ y JavaScript, con HTTP, \MCP{}, backup binario, journal, sidecars del lexicón, tests y benchmarks.
+
+La contribución técnica más importante es que el sistema separa tres cosas que suelen mezclarse:
+\begin{itemize}
+  \item el direccionamiento semántico rápido por firmas binarias;
+  \item la composición y limpieza por hipervectores;
+  \item el vocabulario aprendido que persiste entre sesiones.
+\end{itemize}
+
+Los resultados experimentales son coherentes con esa lectura. En 12k, la paráfrasis supera 0.93 de recall@1; en 50k baja a 0.76, pero la consulta sigue siendo rápida y la negación se mantiene robusta. Eso sugiere que \CHL{} ya es útil como memoria de agente, pero que el siguiente trabajo debe enfocarse en compactación, escalado del lexicón y preservación de paráfrasis sin aumentar ruido.
+
+\section*{Apéndice: interfaz mínima para uso real}
+
+\begin{itemize}
+  \item HTTP: \texttt{/lexicon}, \texttt{/lexicon.tsv}, \texttt{/backup.bin}, \texttt{/state}.
+  \item \MCP{} tools: \texttt{chl\_remember}, \texttt{chl\_recall}, \texttt{chl\_infer}, \texttt{chl\_lexicon}, \texttt{chl\_backup\_binary}, \texttt{chl\_restore\_binary}.
+  \item Recursos \MCP{}: \texttt{chl://memory}, \texttt{chl://lexicon}, \texttt{chl://backup.bin}.
+\end{itemize}
+
+\begin{thebibliography}{99}
+
+\bibitem{indyk1998approximate}
+P. Indyk y R. Motwani.
+\newblock Approximate nearest neighbors: towards removing the curse of dimensionality.
+\newblock \emph{Proceedings of the 30th Annual ACM Symposium on Theory of Computing}, 1998.
+
+\bibitem{charikar2002similarity}
+M. S. Charikar.
+\newblock Similarity estimation techniques from rounding algorithms.
+\newblock \emph{Proceedings of the 34th Annual ACM Symposium on Theory of Computing}, 2002.
+
+\bibitem{broder1997resemblance}
+A. Z. Broder.
+\newblock On the resemblance and containment of documents.
+\newblock \emph{Compression and Complexity of Sequences}, 1997.
+
+\bibitem{kanerva1988sdm}
+P. Kanerva.
+\newblock \emph{Sparse Distributed Memory}.
+\newblock MIT Press, 1988.
+
+\bibitem{kanerva2009hdc}
+P. Kanerva.
+\newblock Hyperdimensional computing: An introduction to computing in distributed representation with high-dimensional random vectors.
+\newblock \emph{Cognitive Computation}, 1(2):139--159, 2009.
+
+\bibitem{plate1995hrr}
+T. A. Plate.
+\newblock Holographic reduced representations.
+\newblock \emph{IEEE Transactions on Neural Networks}, 6(3):623--641, 1995.
+
+\bibitem{gayler2003vsa}
+R. W. Gayler.
+\newblock Vector symbolic architectures answer Jackendoff's challenges for cognitive neuroscience.
+\newblock \emph{Joint International Conference on Cognitive Science}, 2003.
+
+\bibitem{mcpResources}
+Model Context Protocol.
+\newblock Resources.
+\newblock Documentación oficial. \url{https://modelcontextprotocol.io/docs/concepts/resources}.
+
+\bibitem{mcpTools}
+Model Context Protocol.
+\newblock Tools.
+\newblock Documentación oficial. \url{https://modelcontextprotocol.io/specification/2025-06-18/server/tools}.
+
+\bibitem{weaviateHybrid}
+Weaviate.
+\newblock Hybrid search.
+\newblock Documentación oficial. \url{https://docs.weaviate.io/weaviate/concepts/search/hybrid-search}.
+
+\bibitem{pineconeHybrid}
+Pinecone.
+\newblock Hybrid search.
+\newblock Documentación oficial. \url{https://docs.pinecone.io/guides/search/hybrid-search}.
+
+\bibitem{redisVector}
+Redis.
+\newblock Vector search concepts.
+\newblock Documentación oficial. \url{https://redis.io/docs/latest/develop/ai/search-and-query/vectors/}.
+
+\end{thebibliography}
+
+\end{document}
