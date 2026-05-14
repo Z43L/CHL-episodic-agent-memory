@@ -1,6 +1,24 @@
 # CHL Extension
 
-CHL Extension is a local memory system with a Node.js API and an MCP server. It stores conversational memory, supports recall and inference, and exposes export/restore flows for backups and lexicon data.
+CHL Extension is a local memory system built around the CHL engine. It gives an AI agent a persistent place to store facts, preferences, task context, and learned associations, then retrieve that information later through recall and inference.
+
+The project is useful when you want the model to remember important context across turns or sessions without manually re-pasting everything every time. Instead of relying only on the chat window, CHL keeps structured memory that can be queried, reinforced, backed up, and restored.
+
+## What It Is For
+
+- remembering user preferences, decisions, and recurring project context
+- recalling related memories when the model needs supporting information
+- inferring the best answer from stored context instead of returning a raw list
+- exporting and restoring memory state for portability and recovery
+- inspecting learned lexicon data for debugging and reuse
+
+## Why It Helps
+
+- reduces repeated explanation and context loss
+- makes recurring workflows faster and more consistent
+- keeps important memory outside a single conversation
+- provides backup and restore paths for safety
+- exposes both an HTTP API and MCP tools, so it fits interactive and agent-driven workflows
 
 ## What It Includes
 
