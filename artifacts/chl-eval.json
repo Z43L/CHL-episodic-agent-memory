@@ -1,0 +1,15 @@
+{
+  "datasetSize": 8,
+  "distractorSize": 4,
+  "top1Recall": 1,
+  "avgLatencyUs": 23.330205,
+  "exactCollisions": 0,
+  "snapshot": {
+    "bitCount": 128,
+    "bandBits": 32,
+    "hyperDim": 256,
+    "size": 12,
+    "buckets": 48,
+    "exactCollisions": 0
+  }
+}

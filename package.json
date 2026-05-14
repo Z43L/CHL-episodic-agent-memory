@@ -1,0 +1,19 @@
+{
+  "name": "chl-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "bin": {
+    "chl-mcp": "./bin/chl-mcp.js"
+  },
+  "scripts": {
+    "build:native": "node scripts/build-native.js",
+    "test": "npm run build:native && node --test",
+    "eval": "node scripts/evaluate.js",
+    "bench": "node scripts/evaluate.js",
+    "bench:large": "node scripts/evaluate.js --large",
+    "bench:huge": "node scripts/evaluate.js --huge",
+    "serve": "node src/server.js",
+    "serve:mcp": "node src/mcp-server.js"
+  }
+}

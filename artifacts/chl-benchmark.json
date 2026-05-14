@@ -1,0 +1,154 @@
+{
+  "dataset": {
+    "facts": 30,
+    "negatedFacts": 30,
+    "distractors": 30,
+    "queries": 168,
+    "categories": {
+      "positive": 108,
+      "negation": 60
+    }
+  },
+  "systems": [
+    {
+      "name": "chl-native",
+      "queryCount": 168,
+      "recallAt1": 0.8333333333333334,
+      "recallAt3": 0.8392857142857143,
+      "meanRank": 0.8452380952380952,
+      "mrr": 0.8363095238095238,
+      "p95LatencyUs": 2405.791000000022,
+      "medianLatencyUs": 690.8119999999798,
+      "categoryStats": {
+        "positive": {
+          "queryCount": 108,
+          "recallAt1": 0.8518518518518519,
+          "recallAt3": 0.8611111111111112
+        },
+        "negation": {
+          "queryCount": 60,
+          "recallAt1": 0.8,
+          "recallAt3": 0.8
+        }
+      },
+      "bucketStats": {
+        "occupiedBuckets": 344,
+        "collisionBuckets": 0,
+        "totalAssignments": 344,
+        "maxBucketSize": 1,
+        "avgBucketLoad": 1
+      },
+      "snapshot": {
+        "bitCount": 128,
+        "bandBits": 32,
+        "hyperDim": 256,
+        "size": 86,
+        "buckets": 344,
+        "exactCollisions": 0
+      }
+    },
+    {
+      "name": "chl-js",
+      "queryCount": 168,
+      "recallAt1": 0.8333333333333334,
+      "recallAt3": 0.8392857142857143,
+      "meanRank": 0.8452380952380952,
+      "mrr": 0.8363095238095238,
+      "p95LatencyUs": 1317.124999999976,
+      "medianLatencyUs": 708.604500000007,
+      "categoryStats": {
+        "positive": {
+          "queryCount": 108,
+          "recallAt1": 0.8518518518518519,
+          "recallAt3": 0.8611111111111112
+        },
+        "negation": {
+          "queryCount": 60,
+          "recallAt1": 0.8,
+          "recallAt3": 0.8
+        }
+      },
+      "bucketStats": {
+        "occupiedBuckets": 344,
+        "collisionBuckets": 0,
+        "totalAssignments": 344,
+        "maxBucketSize": 1,
+        "avgBucketLoad": 1
+      },
+      "snapshot": {
+        "bitCount": 128,
+        "bandBits": 32,
+        "hyperDim": 256,
+        "size": 86,
+        "buckets": 344,
+        "exactCollisions": 0
+      }
+    },
+    {
+      "name": "exact-match",
+      "queryCount": 168,
+      "recallAt1": 0.35714285714285715,
+      "recallAt3": 0.35714285714285715,
+      "meanRank": 0.35714285714285715,
+      "mrr": 0.35714285714285715,
+      "p95LatencyUs": 5.875000000003183,
+      "medianLatencyUs": 1.7294999999819538,
+      "categoryStats": {
+        "positive": {
+          "queryCount": 108,
+          "recallAt1": 0.2777777777777778,
+          "recallAt3": 0.2777777777777778
+        },
+        "negation": {
+          "queryCount": 60,
+          "recallAt1": 0.5,
+          "recallAt3": 0.5
+        }
+      }
+    },
+    {
+      "name": "jaccard",
+      "queryCount": 168,
+      "recallAt1": 0.9821428571428571,
+      "recallAt3": 0.9940476190476191,
+      "meanRank": 1.0297619047619047,
+      "mrr": 0.9895833333333334,
+      "p95LatencyUs": 91.7919999999981,
+      "medianLatencyUs": 48.02100000000564,
+      "categoryStats": {
+        "positive": {
+          "queryCount": 108,
+          "recallAt1": 0.9722222222222222,
+          "recallAt3": 0.9907407407407407
+        },
+        "negation": {
+          "queryCount": 60,
+          "recallAt1": 1,
+          "recallAt3": 1
+        }
+      }
+    },
+    {
+      "name": "bm25-lite",
+      "queryCount": 168,
+      "recallAt1": 0.9821428571428571,
+      "recallAt3": 0.9940476190476191,
+      "meanRank": 1.0357142857142858,
+      "mrr": 0.9892857142857142,
+      "p95LatencyUs": 47.37499999998818,
+      "medianLatencyUs": 21.812499999981583,
+      "categoryStats": {
+        "positive": {
+          "queryCount": 108,
+          "recallAt1": 0.9722222222222222,
+          "recallAt3": 0.9907407407407407
+        },
+        "negation": {
+          "queryCount": 60,
+          "recallAt1": 1,
+          "recallAt3": 1
+        }
+      }
+    }
+  ]
+}

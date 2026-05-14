@@ -1,0 +1,108 @@
+{
+  "mode": "large",
+  "dataset": {
+    "docs": 12000,
+    "queries": 6000,
+    "positiveDocs": 6000,
+    "negationDocs": 6000,
+    "learnedConcepts": 16,
+    "learnedPhrases": 18,
+    "queryCategories": {
+      "large-positive": 2667,
+      "large-paraphrase": 2666,
+      "large-negation": 667
+    }
+  },
+  "systems": [
+    {
+      "name": "chl-native",
+      "loadMs": 4451.154165999999,
+      "profile": "large",
+      "queryCount": 6000,
+      "recallAt1": 0.9391666666666667,
+      "recallAt3": 0.9398333333333333,
+      "meanRank": 0.9405,
+      "mrr": 0.9395,
+      "p95LatencyUs": 1255.9170000004087,
+      "medianLatencyUs": 452.2084999998697,
+      "categoryStats": {
+        "large-positive": {
+          "queryCount": 2667,
+          "recallAt1": 0.9343832020997376,
+          "recallAt3": 0.9343832020997376
+        },
+        "large-paraphrase": {
+          "queryCount": 2666,
+          "recallAt1": 0.9328582145536384,
+          "recallAt3": 0.9343585896474118
+        },
+        "large-negation": {
+          "queryCount": 667,
+          "recallAt1": 0.9835082458770614,
+          "recallAt3": 0.9835082458770614
+        }
+      },
+      "bucketStats": {
+        "occupiedBuckets": 44391,
+        "collisionBuckets": 1672,
+        "totalAssignments": 46496,
+        "maxBucketSize": 11,
+        "avgBucketLoad": 1.04742
+      },
+      "snapshot": {
+        "bitCount": 128,
+        "bandBits": 32,
+        "hyperDim": 256,
+        "profile": "large",
+        "size": 11624,
+        "buckets": 44391,
+        "exactCollisions": 0
+      }
+    },
+    {
+      "name": "chl-js",
+      "loadMs": 3571.7519999999995,
+      "profile": "large",
+      "queryCount": 6000,
+      "recallAt1": 0.9391666666666667,
+      "recallAt3": 0.9398333333333333,
+      "meanRank": 0.9405,
+      "mrr": 0.9395,
+      "p95LatencyUs": 1329.8329999997804,
+      "medianLatencyUs": 453.8959999990766,
+      "categoryStats": {
+        "large-positive": {
+          "queryCount": 2667,
+          "recallAt1": 0.9343832020997376,
+          "recallAt3": 0.9343832020997376
+        },
+        "large-paraphrase": {
+          "queryCount": 2666,
+          "recallAt1": 0.9328582145536384,
+          "recallAt3": 0.9343585896474118
+        },
+        "large-negation": {
+          "queryCount": 667,
+          "recallAt1": 0.9835082458770614,
+          "recallAt3": 0.9835082458770614
+        }
+      },
+      "bucketStats": {
+        "occupiedBuckets": 44391,
+        "collisionBuckets": 1672,
+        "totalAssignments": 46496,
+        "maxBucketSize": 11,
+        "avgBucketLoad": 1.04742
+      },
+      "snapshot": {
+        "bitCount": 128,
+        "bandBits": 32,
+        "hyperDim": 256,
+        "profile": "large",
+        "size": 11624,
+        "buckets": 44391,
+        "exactCollisions": 0
+      }
+    }
+  ]
+}
