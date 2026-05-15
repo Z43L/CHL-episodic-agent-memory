@@ -25,12 +25,10 @@ const { NativeCHL } = require("./native");
 const { createServer } = require("./server");
 const { callTool, createMcpContext, handleMcpMessage, listResources, listTools, readResource } = require("./mcp");
 const {
-  archiveToBase64,
-  base64ToArchive,
-  decodeArchiveBinary,
-  encodeArchiveBinary,
-  readArchiveBinary,
-  writeArchiveBinary,
+  decodeMemoryArchive,
+  encodeMemoryArchive,
+  readMemoryArchive,
+  writeMemoryArchive,
 } = require("./backup");
 const {
   conceptualizeTokens,
@@ -66,19 +64,17 @@ module.exports = {
   listResources,
   listTools,
   readResource,
-  archiveToBase64,
-  base64ToArchive,
-  decodeArchiveBinary,
-  encodeArchiveBinary,
+  decodeMemoryArchive,
+  encodeMemoryArchive,
   conceptualizeTokens,
   getConceptMap,
   learnConceptPairsFromExamples,
   loadLexiconState,
-  readArchiveBinary,
+  readMemoryArchive,
   serializeConceptMap,
   saveLexiconState,
   serializePairList,
   tokenize,
   vectorFromSeed,
-  writeArchiveBinary,
+  writeMemoryArchive,
 };

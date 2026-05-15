@@ -85,14 +85,12 @@ By default the server listens on `http://127.0.0.1:3030`.
 - `GET /lexicon.concepts.tsv`
 - `GET /lexicon.phrases.tsv`
 - `GET /lexicon.tsv`
-- `GET /backup`
-- `GET /backup.bin`
+- `GET /backup.memory`
 - `POST /remember`
 - `POST /recall`
 - `POST /infer`
 - `POST /learn`
-- `POST /restore`
-- `POST /restore.bin`
+- `POST /restore.memory`
 
 ### Example HTTP Usage
 
@@ -135,22 +133,14 @@ curl -X POST http://127.0.0.1:3030/infer \
 Export a backup:
 
 ```bash
-curl http://127.0.0.1:3030/backup
+curl -OJ http://127.0.0.1:3030/backup.memory
 ```
 
 Restore a backup:
 
 ```bash
-curl -X POST http://127.0.0.1:3030/restore \
-  -H "content-type: application/json" \
-  -d '{
-    "backup": {
-      "entries": [],
-      "journal": [],
-      "snapshot": {}
-    },
-    "replace": true
-  }'
+curl -X POST http://127.0.0.1:3030/restore.memory \
+  --data-binary @backup.memory
 ```
 
 ## Run the MCP Server
@@ -175,12 +165,10 @@ The MCP server exposes these tools:
 - `chl_recall`
 - `chl_infer`
 - `chl_learn`
-- `chl_backup`
-- `chl_backup_binary`
+- `chl_backup_memory`
 - `chl_lexicon`
 - `chl_lexicon_export`
-- `chl_restore`
-- `chl_restore_binary`
+- `chl_restore_memory`
 - `chl_snapshot`
 - `chl_profile`
 - `chl_state`
@@ -196,8 +184,7 @@ It also exposes these read-only resources:
 - `chl://state`
 - `chl://entries`
 - `chl://journal`
-- `chl://backup`
-- `chl://backup.bin`
+- `chl://backup.memory`
 - `chl://lexicon`
 - `chl://lexicon.concepts`
 - `chl://lexicon.phrases`
@@ -209,7 +196,7 @@ It also exposes these read-only resources:
 - Use `chl_recall` when you need supporting context before answering.
 - Use `chl_infer` when the right answer depends on several stored memories.
 - Use `chl_learn` to reinforce a good pattern or correct a bad one.
-- Use `chl_backup` or `chl_backup_binary` before risky edits or migrations.
+- Use `chl_backup_memory` before risky edits or migrations.
 - Use `chl_lexicon_export` when you want TSV output for reuse elsewhere.
 
 ## Environment Variables

@@ -1,4 +1,3 @@
-const fs = require("node:fs");
 const { resolveMemoryProfile } = require("./profiles");
 const { serializePairList } = require("./concepts");
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -92,20 +91,14 @@ function toolDefinitions() {
       },
     },
     {
-      name: "chl_backup",
-      description: "Export the full CHL memory backup as JSON for compatibility.",
+      name: "chl_backup_memory",
+      description: "Export the full CHL memory backup to a .memory file path.",
       inputSchema: {
         type: "object",
-        properties: {},
-        additionalProperties: false,
-      },
-    },
-    {
-      name: "chl_backup_binary",
-      description: "Export the full CHL memory backup as compressed binary encoded in base64.",
-      inputSchema: {
-        type: "object",
-        properties: {},
+        properties: {
+          backupPath: { type: "string" },
+        },
+        required: ["backupPath"],
         additionalProperties: false,
       },
     },
@@ -128,28 +121,15 @@ function toolDefinitions() {
       },
     },
     {
-      name: "chl_restore",
-      description: "Restore CHL memory from a previously exported backup.",
+      name: "chl_restore_memory",
+      description: "Restore CHL memory from a .memory file path.",
       inputSchema: {
         type: "object",
         properties: {
-          backup: { description: "Backup object or JSON string", oneOf: [{ type: "object" }, { type: "string" }] },
           backupPath: { type: "string" },
           replace: { type: "boolean", default: true },
         },
-        additionalProperties: false,
-      },
-    },
-    {
-      name: "chl_restore_binary",
-      description: "Restore CHL memory from a compressed binary backup.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          backupBase64: { type: "string" },
-          backupPath: { type: "string" },
-          replace: { type: "boolean", default: true },
-        },
+        required: ["backupPath"],
         additionalProperties: false,
       },
     },
@@ -257,16 +237,11 @@ async function callTool(context, name, args = {}) {
     case "chl_learn":
       context.memory.learn(args.input, args.reward ?? 0);
       return { content: jsonContent({ ok: true }) };
-    case "chl_backup":
-      return { content: jsonContent(context.memory.backup()) };
-    case "chl_backup_binary":
-      return {
-        content: jsonContent({
-          format: "chl-archive-bin-v1",
-          encoding: "base64",
-          data: context.memory.backupBinaryBase64(),
-        }),
-      };
+    case "chl_backup_memory":
+      if (!args.backupPath) {
+        throw new Error("chl_backup_memory requires backupPath");
+      }
+      return { content: jsonContent(context.memory.saveMemory(args.backupPath)) };
     case "chl_lexicon":
       return { content: jsonContent(lexiconPayload()) };
     case "chl_lexicon_export":
@@ -276,24 +251,11 @@ async function callTool(context, name, args = {}) {
           ...lexiconPayload(),
         }),
       };
-    case "chl_restore": {
-      let backup = args.backup;
-      if (args.backupPath) {
-        backup = fs.readFileSync(args.backupPath, "utf8");
+    case "chl_restore_memory": {
+      if (!args.backupPath) {
+        throw new Error("chl_restore_memory requires backupPath");
       }
-      const result = context.memory.restore(backup, { replace: args.replace ?? true });
-      return { content: jsonContent(result) };
-    }
-    case "chl_restore_binary": {
-      if (args.backupPath) {
-        const result = context.memory.loadBackupBinary(args.backupPath, { replace: args.replace ?? true });
-        return { content: jsonContent(result) };
-      }
-      const backupBase64 = args.backupBase64 ?? args.backup;
-      if (typeof backupBase64 !== "string" || backupBase64.length === 0) {
-        throw new Error("chl_restore_binary requires backupBase64 or backupPath");
-      }
-      const result = context.memory.restoreBinaryBase64(backupBase64, { replace: args.replace ?? true });
+      const result = context.memory.loadMemory(args.backupPath, { replace: args.replace ?? true });
       return { content: jsonContent(result) };
     }
     case "chl_snapshot":
@@ -354,16 +316,10 @@ function listResources(context) {
         description: "Mutation journal used for persistence.",
       },
       {
-        uri: "chl://backup",
-        mimeType: "application/json",
-        name: "CHL Backup",
-        description: "Compatibility JSON backup archive.",
-      },
-      {
-        uri: "chl://backup.bin",
-        mimeType: "text/plain",
-        name: "CHL Backup Binary",
-        description: "Compressed binary backup encoded as base64.",
+        uri: "chl://backup.memory",
+        mimeType: "application/octet-stream",
+        name: "CHL Backup Memory",
+        description: "Binary .memory backup archive.",
       },
       {
         uri: "chl://lexicon",
@@ -406,10 +362,16 @@ async function readResource(context, uri) {
       return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.entries(), null, 2) }] };
     case "chl://journal":
       return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.journal(), null, 2) }] };
-    case "chl://backup":
-      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.backup(), null, 2) }] };
-    case "chl://backup.bin":
-      return { contents: [{ uri, mimeType: "text/plain", text: context.memory.backupBinaryBase64() }] };
+    case "chl://backup.memory":
+      return {
+        contents: [
+          {
+            uri,
+            mimeType: "application/octet-stream",
+            blob: context.memory.backupMemory(),
+          },
+        ],
+      };
     case "chl://lexicon": {
       const current = context.memory.lexicon();
       return {

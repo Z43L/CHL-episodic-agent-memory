@@ -31,7 +31,7 @@ function writeMessage(message, mode = "framed") {
   debugLog("write", { id: message?.id ?? null, method: message?.method ?? null, mode });
 }
 
-function createFramedReader(onMessage) {
+function createFramedReader(onMessage, input = stdin) {
   let buffer = Buffer.alloc(0);
   const MAX_DEBUG_PREVIEW = 180;
 
@@ -48,7 +48,19 @@ function createFramedReader(onMessage) {
     }
   }
 
-  stdin.on("data", (chunk) => {
+  function dispatchJsonLines() {
+    while (buffer.length > 0) {
+      const newlineIndex = buffer.indexOf(10);
+      if (newlineIndex === -1) return;
+
+      const line = buffer.slice(0, newlineIndex).toString("utf8").replace(/\r$/, "");
+      buffer = buffer.slice(newlineIndex + 1);
+      if (!line.trim()) continue;
+      parseAndDispatchJson(line);
+    }
+  }
+
+  input.on("data", (chunk) => {
     debugLog("stdin_data", {
       bytes: chunk.length,
       preview: chunk.toString("utf8", 0, Math.min(chunk.length, MAX_DEBUG_PREVIEW)),
@@ -59,6 +71,12 @@ function createFramedReader(onMessage) {
       // Fallback mode: some clients send plain JSON-RPC objects without
       // Content-Length framing. If the current buffer is parseable JSON,
       // consume it and continue.
+      if (/^\s*Content-Length:/i.test(buffer.toString("utf8"))) {
+        break;
+      }
+
+      dispatchJsonLines();
+
       const asText = buffer.toString("utf8").trim();
       if (asText.startsWith("{") && asText.endsWith("}")) {
         if (parseAndDispatchJson(asText)) {
@@ -113,11 +131,11 @@ function createFramedReader(onMessage) {
     }
   });
 
-  stdin.on("end", () => {
+  input.on("end", () => {
     debugLog("stdin_end");
   });
 
-  stdin.on("close", () => {
+  input.on("close", () => {
     debugLog("stdin_close");
   });
 }
@@ -182,4 +200,4 @@ if (require.main === module) {
   start();
 }
 
-module.exports = { start };
+module.exports = { start, createFramedReader };

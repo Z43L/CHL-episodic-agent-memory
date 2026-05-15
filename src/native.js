@@ -3,12 +3,10 @@ const readline = require("node:readline");
 const path = require("node:path");
 const { charNgrams, normalizeText, tokenize } = require("./utils");
 const {
-  archiveToBase64,
-  base64ToArchive,
-  decodeArchiveBinary,
-  encodeArchiveBinary,
-  readArchiveBinary,
-  writeArchiveBinary,
+  decodeMemoryArchive,
+  encodeMemoryArchive,
+  readMemoryArchive,
+  writeMemoryArchive,
 } = require("./backup");
 const { loadLexiconState, saveLexiconState } = require("./concepts");
 const { resolveMemoryProfile } = require("./profiles");
@@ -204,7 +202,7 @@ class NativeCHL {
       ...raw,
       candidates: raw.candidates.map((candidate) => ({
         ...candidate,
-        payload: safeParse(candidate.payloadJson),
+        payload: unwrapCandidatePayload(candidate),
       })),
     };
   }
@@ -212,10 +210,10 @@ class NativeCHL {
   infer(query, options = {}) {
     const result = this.recall(query, options);
     const best = result.candidates[0] ?? null;
-    const answer = best?.payload?.payload ?? best?.payload ?? null;
+    const answer = unwrapCandidatePayload(best);
     return {
       answer,
-      support: result.candidates.map((candidate) => candidate.payload?.payload ?? candidate.payload),
+      support: result.candidates.map((candidate) => unwrapCandidatePayload(candidate)),
       confidence: result.confidence ?? 0,
       candidates: result.candidates,
       queryHash: result.queryHash,
@@ -383,7 +381,7 @@ class NativeCHL {
     const result = this.recall(query, options);
     const routed = [];
     for (const candidate of result.candidates) {
-      const payload = candidate.payload?.payload ?? candidate.payload;
+      const payload = unwrapCandidatePayload(candidate);
       if (payload && typeof payload === "object" && Array.isArray(payload.relations)) {
         for (const relation of payload.relations) {
           if (relation && relation.key === relationKey) {
@@ -423,12 +421,8 @@ class NativeCHL {
     };
   }
 
-  backupBinary() {
-    return encodeArchiveBinary(this.backup());
-  }
-
-  backupBinaryBase64() {
-    return archiveToBase64(this.backup());
+  backupMemory() {
+    return encodeMemoryArchive(this.backup());
   }
 
   restore(backupInput, options = {}) {
@@ -468,23 +462,18 @@ class NativeCHL {
     };
   }
 
-  restoreBinary(buffer, options = {}) {
-    const backup = decodeArchiveBinary(buffer);
+  restoreMemory(buffer, options = {}) {
+    const backup = decodeMemoryArchive(buffer);
     return this.restore(backup, options);
   }
 
-  restoreBinaryBase64(base64, options = {}) {
-    const backup = base64ToArchive(base64);
-    return this.restore(backup, options);
-  }
-
-  saveBackupBinary(filePath) {
-    writeArchiveBinary(filePath, this.backup());
+  saveMemory(filePath) {
+    writeMemoryArchive(filePath, this.backup());
     return { ok: true, path: filePath };
   }
 
-  loadBackupBinary(filePath, options = {}) {
-    const backup = readArchiveBinary(filePath);
+  loadMemory(filePath, options = {}) {
+    const backup = readMemoryArchive(filePath);
     return this.restore(backup, options);
   }
 
@@ -498,23 +487,16 @@ class NativeCHL {
 
   _normalizeBackupInput(backupInput) {
     if (Buffer.isBuffer(backupInput) || backupInput instanceof Uint8Array) {
-      return decodeArchiveBinary(backupInput);
+      return decodeMemoryArchive(backupInput);
     }
     if (typeof backupInput === "string") {
       const trimmed = backupInput.trim();
       if (trimmed.startsWith("{")) {
         return JSON.parse(trimmed);
       }
-      if (trimmed.length > 80 && /^[A-Za-z0-9+/=]+$/.test(trimmed)) {
-        try {
-          return base64ToArchive(trimmed);
-        } catch {
-          // fall through to JSON/path handling
-        }
-      }
       if (fs.existsSync(trimmed)) {
         const binary = fs.readFileSync(trimmed);
-        return decodeArchiveBinary(binary);
+        return decodeMemoryArchive(binary);
       }
       return JSON.parse(trimmed);
     }
@@ -528,6 +510,23 @@ function safeParse(value) {
   } catch {
     return value;
   }
+}
+
+function unwrapCandidatePayload(candidate) {
+  if (!candidate || typeof candidate !== "object") return null;
+  if (candidate.payload !== undefined) {
+    return candidate.payload;
+  }
+  if (candidate.payloadJson !== undefined) {
+    return safeParse(candidate.payloadJson);
+  }
+  if (candidate.entry && candidate.entry.payload !== undefined) {
+    return candidate.entry.payload;
+  }
+  if (candidate.entry && candidate.entry.payloadJson !== undefined) {
+    return safeParse(candidate.entry.payloadJson);
+  }
+  return null;
 }
 
 module.exports = {

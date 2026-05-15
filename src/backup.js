@@ -5,7 +5,7 @@ const MAGIC = Buffer.from("CHLB");
 const VERSION = 1;
 const CODEC_DEFLATE = 1;
 
-function encodeArchiveBinary(archive) {
+function encodeMemoryArchive(archive) {
   const json = Buffer.from(JSON.stringify(archive), "utf8");
   const compressed = zlib.deflateSync(json, { level: 9 });
   const header = Buffer.alloc(12);
@@ -17,7 +17,7 @@ function encodeArchiveBinary(archive) {
   return Buffer.concat([header, compressed]);
 }
 
-function decodeArchiveBinary(buffer) {
+function decodeMemoryArchive(buffer) {
   const input = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
   if (input.length < 12) {
     throw new Error("Invalid CHL binary backup");
@@ -42,27 +42,17 @@ function decodeArchiveBinary(buffer) {
   return JSON.parse(json);
 }
 
-function writeArchiveBinary(filePath, archive) {
-  fs.writeFileSync(filePath, encodeArchiveBinary(archive));
+function writeMemoryArchive(filePath, archive) {
+  fs.writeFileSync(filePath, encodeMemoryArchive(archive));
 }
 
-function readArchiveBinary(filePath) {
-  return decodeArchiveBinary(fs.readFileSync(filePath));
-}
-
-function archiveToBase64(archive) {
-  return encodeArchiveBinary(archive).toString("base64");
-}
-
-function base64ToArchive(base64) {
-  return decodeArchiveBinary(Buffer.from(base64, "base64"));
+function readMemoryArchive(filePath) {
+  return decodeMemoryArchive(fs.readFileSync(filePath));
 }
 
 module.exports = {
-  archiveToBase64,
-  base64ToArchive,
-  decodeArchiveBinary,
-  encodeArchiveBinary,
-  readArchiveBinary,
-  writeArchiveBinary,
+  decodeMemoryArchive,
+  encodeMemoryArchive,
+  readMemoryArchive,
+  writeMemoryArchive,
 };

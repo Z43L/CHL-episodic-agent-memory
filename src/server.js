@@ -37,11 +37,15 @@ function sendJson(res, statusCode, payload) {
   res.end(body);
 }
 
-function sendBinary(res, statusCode, buffer, contentType = "application/octet-stream") {
-  res.writeHead(statusCode, {
+function sendBinary(res, statusCode, buffer, contentType = "application/octet-stream", filename = null) {
+  const headers = {
     "content-type": contentType,
     "content-length": buffer.length,
-  });
+  };
+  if (filename) {
+    headers["content-disposition"] = `attachment; filename="${filename}"`;
+  }
+  res.writeHead(statusCode, headers);
   res.end(buffer);
 }
 
@@ -144,13 +148,8 @@ function createServer(options = {}) {
         return;
       }
 
-      if (req.method === "GET" && req.url === "/backup") {
-        sendJson(res, 200, memory.backup());
-        return;
-      }
-
-      if (req.method === "GET" && req.url === "/backup.bin") {
-        sendBinary(res, 200, memory.backupBinary());
+      if (req.method === "GET" && req.url === "/backup.memory") {
+        sendBinary(res, 200, memory.backupMemory(), "application/octet-stream", "backup.memory");
         return;
       }
 
@@ -182,17 +181,9 @@ function createServer(options = {}) {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/restore") {
-        const body = await readBody(req);
-        const backup = body.backup ?? body.archive ?? body;
-        const result = memory.restore(backup, { replace: body.replace ?? true });
-        sendJson(res, 200, result);
-        return;
-      }
-
-      if (req.method === "POST" && req.url === "/restore.bin") {
+      if (req.method === "POST" && req.url === "/restore.memory") {
         const body = await readBodyBuffer(req);
-        const result = memory.restoreBinary(body);
+        const result = memory.restoreMemory(body);
         sendJson(res, 200, result);
         return;
       }

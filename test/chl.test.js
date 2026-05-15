@@ -14,6 +14,7 @@ const {
 const { saveLexiconState } = require("../src/concepts");
 const { createServer } = require("../src/server");
 const { createMcpContext, handleMcpMessage } = require("../src/mcp");
+const { createFramedReader } = require("../src/mcp-server");
 
 function invokeServer(server, { method, url, body }) {
   return new Promise((resolve, reject) => {
@@ -184,25 +185,20 @@ test("backup and restore work over HTTP", async () => {
 
   const backupResponse = await invokeServer(server, {
     method: "GET",
-    url: "/backup",
+    url: "/backup.memory",
   });
-  const backup = JSON.parse(backupResponse.body);
-  assert.equal(backup.format, "chl-archive-v1");
-
-  const backupBin = await invokeServer(server, {
-    method: "GET",
-    url: "/backup.bin",
-  });
-  assert.ok(backupBin.buffer.slice(0, 4).toString("utf8") === "CHLB");
+  assert.ok(backupResponse.buffer.slice(0, 4).toString("utf8") === "CHLB");
 
   const restoreDir = fs.mkdtempSync(path.join(os.tmpdir(), "chl-http-restore-"));
   const restorePath = path.join(restoreDir, "memory.log");
+  const backupPath = path.join(restoreDir, "backup.memory");
+  fs.writeFileSync(backupPath, backupResponse.buffer);
   const restoreServer = createServer({ memory: { persistPath: restorePath, bitCount: 128, hyperDim: 256 } });
 
   const restoredResponse = await invokeServer(restoreServer, {
     method: "POST",
-    url: "/restore.bin",
-    body: backupBin.buffer,
+    url: "/restore.memory",
+    body: fs.readFileSync(backupPath),
   });
   const inferResponse = await invokeServer(restoreServer, {
     method: "POST",
@@ -256,7 +252,7 @@ test("backup and restore are exposed through MCP tools", async () => {
     jsonrpc: "2.0",
     id: 4,
     method: "tools/call",
-    params: { name: "chl_backup_binary", arguments: {} },
+    params: { name: "chl_backup_memory", arguments: { backupPath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "chl-mcp-backup-")), "backup.memory") } },
   });
   const backupPayload = JSON.parse(backup.result.content[0].text);
 
@@ -267,7 +263,7 @@ test("backup and restore are exposed through MCP tools", async () => {
     jsonrpc: "2.0",
     id: 5,
     method: "tools/call",
-    params: { name: "chl_restore_binary", arguments: { backupBase64: backupPayload.data, replace: true } },
+    params: { name: "chl_restore_memory", arguments: { backupPath: backupPayload.path, replace: true } },
   });
 
   const snapshot = await handleMcpMessage(fresh, {
@@ -297,16 +293,21 @@ test("backup and restore are exposed through MCP tools", async () => {
   });
   const resources = await handleMcpMessage(fresh, { jsonrpc: "2.0", id: 10, method: "resources/list", params: {} });
   const resourceRead = await handleMcpMessage(fresh, { jsonrpc: "2.0", id: 11, method: "resources/read", params: { uri: "chl://memory" } });
+  const backupResource = await handleMcpMessage(fresh, { jsonrpc: "2.0", id: 12, method: "resources/read", params: { uri: "chl://backup.memory" } });
   const entriesPayload = JSON.parse(resourceRead.result.contents[0].text);
+  const backupResourcePayload = backupResource.result.contents[0];
   const inferPayload = JSON.parse(infer.result.content[0].text);
   const recallPayload = JSON.parse(recall.result.content[0].text);
 
   assert.ok(Array.isArray(listed.result.tools));
-  assert.equal(backupPayload.format, "chl-archive-bin-v1");
+  assert.ok(backupPayload.ok);
+  assert.ok(fs.existsSync(backupPayload.path));
   assert.ok(restored.result.content[0].text.includes("\"ok\": true"));
   assert.equal(statePayload.entries.length, 1);
   assert.ok(resources.result.resources.length >= 5);
   assert.equal(entriesPayload.entries.length, 1);
+  assert.equal(backupResourcePayload.mimeType, "application/octet-stream");
+  assert.ok(Buffer.isBuffer(backupResourcePayload.blob));
   assert.equal(inferPayload.answer.fact, "cat");
   assert.ok(Array.isArray(recallPayload.candidates));
   assert.ok(learn.result.content[0].text.length > 0);
@@ -447,4 +448,24 @@ test("MCP exposes the active memory profile", async () => {
 
   assert.equal(toolPayload.profile, "large");
   assert.equal(resourcePayload.profile, "large");
+});
+
+test("MCP reader handles multiple JSON messages in one chunk", () => {
+  const input = new EventEmitter();
+  const messages = [];
+
+  createFramedReader((message) => {
+    messages.push(message);
+  }, input);
+
+  input.emit(
+    "data",
+    Buffer.from(
+      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n"
+    )
+  );
+
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0].id, 1);
+  assert.equal(messages[1].id, 2);
 });
