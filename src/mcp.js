@@ -21,6 +21,12 @@ function createMcpContext(options = {}) {
   };
 }
 
+async function ensureMemoryReady(context) {
+  if (context?.memory && typeof context.memory.whenReady === "function") {
+    await context.memory.whenReady();
+  }
+}
+
 function toolDefinitions() {
   return [
     {
@@ -213,7 +219,8 @@ function jsonContent(data) {
   ];
 }
 
-function callTool(context, name, args = {}) {
+async function callTool(context, name, args = {}) {
+  await ensureMemoryReady(context);
   const lexicon = () => context.memory.lexicon();
   const lexiconPayload = () => {
     const current = lexicon();
@@ -377,7 +384,8 @@ function listResources(context) {
   };
 }
 
-function readResource(context, uri) {
+async function readResource(context, uri) {
+  await ensureMemoryReady(context);
   switch (uri) {
     case "chl://memory":
       return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.dumpState(), null, 2) }] };
@@ -479,21 +487,19 @@ function handleMcpMessage(context, message) {
   }
 
   if (message.method === "resources/read") {
-    const result = readResource(context, message.params?.uri);
-    return {
+    return readResource(context, message.params?.uri).then((result) => ({
       jsonrpc: "2.0",
       id: message.id,
       result,
-    };
+    }));
   }
 
   if (message.method === "tools/call") {
-    const result = callTool(context, message.params?.name, message.params?.arguments ?? {});
-    return {
+    return callTool(context, message.params?.name, message.params?.arguments ?? {}).then((result) => ({
       jsonrpc: "2.0",
       id: message.id,
       result,
-    };
+    }));
   }
 
   if (message.method === "ping") {
@@ -525,5 +531,6 @@ module.exports = {
   listTools,
   listResources,
   readResource,
+  ensureMemoryReady,
   toolDefinitions,
 };

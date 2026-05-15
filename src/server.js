@@ -81,6 +81,8 @@ function createServer(options = {}) {
   const memory = new NativeCHL(memoryOptions);
   return http.createServer(async (req, res) => {
     try {
+      await memory.whenReady();
+
       if (req.method === "GET" && req.url === "/health") {
         sendJson(res, 200, { ok: true, snapshot: memory.snapshot() });
         return;

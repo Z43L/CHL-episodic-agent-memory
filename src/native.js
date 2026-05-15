@@ -1,4 +1,5 @@
 const fs = require("node:fs");
+const readline = require("node:readline");
 const path = require("node:path");
 const { charNgrams, normalizeText, tokenize } = require("./utils");
 const {
@@ -39,6 +40,7 @@ class NativeCHL {
     this.phrasesPath = this.options.phrasesPath ?? this._deriveSidecarPath(".phrases.tsv");
     this._hydrating = false;
     this._journal = [];
+    this._readyError = null;
     this.fallback = null;
     this._syncLexiconEnv();
     if (binding) {
@@ -56,7 +58,9 @@ class NativeCHL {
       this.fallback = new CHL(this.options);
     }
     this._ensurePersistDir();
-    this._hydrateFromDisk();
+    this._ready = this._hydrateFromDiskAsync().catch((error) => {
+      this._readyError = error;
+    });
   }
 
   _ensurePersistDir() {
@@ -93,25 +97,38 @@ class NativeCHL {
     });
   }
 
-  _hydrateFromDisk() {
+  async _hydrateFromDiskAsync() {
     if (!this.persistPath || !fs.existsSync(this.persistPath)) return;
-    const raw = fs.readFileSync(this.persistPath, "utf8");
-    if (!raw.trim()) return;
     this._hydrating = true;
     try {
-      const lines = raw.split("\n").filter(Boolean);
-      for (const line of lines) {
-        const event = JSON.parse(line);
-        this._journal.push(event);
-        if (event.type === "remember") {
-          this.remember(event.text, event.payload, event.metadata);
-        } else if (event.type === "learn") {
-          this.learn(event.text, event.reward);
+      const stream = fs.createReadStream(this.persistPath, { encoding: "utf8" });
+      const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
+      try {
+        for await (const line of reader) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line);
+          this._journal.push(event);
+          if (event.type === "remember") {
+            this.remember(event.text, event.payload, event.metadata);
+          } else if (event.type === "learn") {
+            this.learn(event.text, event.reward);
+          }
         }
+      } finally {
+        reader.close();
+        stream.destroy();
       }
     } finally {
       this._hydrating = false;
     }
+  }
+
+  whenReady() {
+    return this._ready.then(() => {
+      if (this._readyError) {
+        throw this._readyError;
+      }
+    });
   }
 
   _appendEvent(event) {

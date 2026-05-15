@@ -1,0 +1,7 @@
+interface:
+  display_name: "CHL Dynamic Retrieval"
+  short_description: "Recover CHL info on demand"
+  default_prompt: "Use $chl-dynamic-retrieval to recover, inspect, or synthesize the right information from CHL Memory dynamically."
+
+policy:
+  allow_implicit_invocation: true

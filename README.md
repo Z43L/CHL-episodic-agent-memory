@@ -20,6 +20,15 @@ The project is useful when you want the model to remember important context acro
 - provides backup and restore paths for safety
 - exposes both an HTTP API and MCP tools, so it fits interactive and agent-driven workflows
 
+## Example Workflow
+
+1. Save an important fact, preference, or decision with `remember`.
+2. Retrieve related context later with `recall`.
+3. Use `infer` when you want the system to synthesize the best answer from memory.
+4. Reinforce or correct behavior with `learn`.
+5. Export a backup before major changes.
+6. Restore the backup if you need to recover a previous state.
+
 ## What It Includes
 
 - A native CHL-backed memory engine
@@ -85,6 +94,65 @@ By default the server listens on `http://127.0.0.1:3030`.
 - `POST /restore`
 - `POST /restore.bin`
 
+### Example HTTP Usage
+
+Store a memory:
+
+```bash
+curl -X POST http://127.0.0.1:3030/remember \
+  -H "content-type: application/json" \
+  -d '{
+    "text": "El usuario prefiere respuestas en español",
+    "metadata": {
+      "source": "conversation",
+      "topic": "language preference"
+    }
+  }'
+```
+
+Search for related memories:
+
+```bash
+curl -X POST http://127.0.0.1:3030/recall \
+  -H "content-type: application/json" \
+  -d '{
+    "query": "preferencia de idioma",
+    "topK": 5
+  }'
+```
+
+Ask CHL to infer an answer:
+
+```bash
+curl -X POST http://127.0.0.1:3030/infer \
+  -H "content-type: application/json" \
+  -d '{
+    "query": "Como debo responder al usuario?",
+    "topK": 5
+  }'
+```
+
+Export a backup:
+
+```bash
+curl http://127.0.0.1:3030/backup
+```
+
+Restore a backup:
+
+```bash
+curl -X POST http://127.0.0.1:3030/restore \
+  -H "content-type: application/json" \
+  -d '{
+    "backup": {
+      "entries": [],
+      "journal": [],
+      "snapshot": {}
+    },
+    "replace": true
+  }'
+```
+
 ## Run the MCP Server
 
 Start the MCP transport server:
@@ -135,6 +203,15 @@ It also exposes these read-only resources:
 - `chl://lexicon.phrases`
 - `chl://lexicon.tsv`
 
+### Example MCP Usage
+
+- Use `chl_remember` when the user shares a stable fact, preference, or decision.
+- Use `chl_recall` when you need supporting context before answering.
+- Use `chl_infer` when the right answer depends on several stored memories.
+- Use `chl_learn` to reinforce a good pattern or correct a bad one.
+- Use `chl_backup` or `chl_backup_binary` before risky edits or migrations.
+- Use `chl_lexicon_export` when you want TSV output for reuse elsewhere.
+
 ## Environment Variables
 
 - `CHL_PERSIST_PATH` - persistence path for memory state
@@ -164,3 +241,11 @@ npm run bench:huge
 - The MCP server reads and writes memory through the native CHL implementation.
 - Backup restore operations can replace or merge depending on the `replace` flag.
 - Lexicon exports are available as TSV for reuse in other workflows.
+
+## Typical Use Cases
+
+- personal or project memory for an AI assistant
+- remembering user-specific preferences across sessions
+- storing decision history for long-running workflows
+- retrieving related context before drafting an answer
+- keeping a persistent backup of important conversational knowledge

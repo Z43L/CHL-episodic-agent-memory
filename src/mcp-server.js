@@ -45,9 +45,41 @@ function createFramedReader(onMessage) {
 function start() {
   const context = createMcpContext();
   createFramedReader((message) => {
-    const response = handleMcpMessage(context, message);
-    if (response && message.id !== undefined && message.id !== null) {
-      writeMessage(response);
+    try {
+      const response = handleMcpMessage(context, message);
+      Promise.resolve(response)
+        .then((resolved) => {
+          if (resolved && message.id !== undefined && message.id !== null) {
+            writeMessage(resolved);
+          }
+        })
+        .catch((error) => {
+          if (message.id !== undefined && message.id !== null) {
+            writeMessage({
+              jsonrpc: "2.0",
+              id: message.id,
+              error: {
+                code: -32603,
+                message: error.message,
+              },
+            });
+          } else {
+            stderr.write(`${error.message}\n`);
+          }
+        });
+    } catch (error) {
+      if (message.id !== undefined && message.id !== null) {
+        writeMessage({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: {
+            code: -32603,
+            message: error.message,
+          },
+        });
+      } else {
+        stderr.write(`${error.message}\n`);
+      }
     }
   });
 }

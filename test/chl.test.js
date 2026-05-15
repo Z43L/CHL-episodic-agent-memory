@@ -89,7 +89,7 @@ test("feedback updates the semantic bias without breaking recall", () => {
   assert.ok(after >= before - 0.05);
 });
 
-test("persistent memory survives reinits", () => {
+test("persistent memory survives reinits", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chl-persist-"));
   const persistPath = path.join(dir, "memory.log");
 
@@ -98,6 +98,7 @@ test("persistent memory survives reinits", () => {
     hyperDim: 256,
     persistPath,
   });
+  await first.whenReady();
   first.remember("El gato duerme sobre la mesa", { fact: "cat" }, { quality: 8 });
   first.remember("El tren entra en la estacion", { fact: "train" }, { quality: 7 });
 
@@ -106,13 +107,14 @@ test("persistent memory survives reinits", () => {
     hyperDim: 256,
     persistPath,
   });
+  await second.whenReady();
   const result = second.infer("El gato duerme en la mesa");
 
   assert.equal(result.answer.fact, "cat");
   assert.ok(fs.readFileSync(persistPath, "utf8").trim().length > 0);
 });
 
-test("lexicon persistence survives reinits and restore", () => {
+test("lexicon persistence survives reinits and restore", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chl-lexicon-"));
   const persistPath = path.join(dir, "memory.log");
   const conceptsPath = path.join(dir, "memory.concepts.tsv");
@@ -139,6 +141,7 @@ test("lexicon persistence survives reinits and restore", () => {
     conceptsPath,
     phrasesPath,
   });
+  await first.whenReady();
   const backup = first.backup();
 
   assert.equal(backup.lexicon.concepts.length, 2);
@@ -156,6 +159,7 @@ test("lexicon persistence survives reinits and restore", () => {
     conceptsPath: restoreConceptsPath,
     phrasesPath: restorePhrasesPath,
   });
+  await second.whenReady();
   const restored = second.restore(backup, { replace: true });
 
   assert.ok(restored.ok);
@@ -227,13 +231,13 @@ test("HTTP exposes the active memory profile", async () => {
   assert.equal(payload.profile, "large");
 });
 
-test("backup and restore are exposed through MCP tools", () => {
+test("backup and restore are exposed through MCP tools", async () => {
   const context = createMcpContext({
     memory: { bitCount: 128, hyperDim: 256 },
   });
 
-  handleMcpMessage(context, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
-  handleMcpMessage(context, {
+  await handleMcpMessage(context, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+  await handleMcpMessage(context, {
     jsonrpc: "2.0",
     id: 2,
     method: "tools/call",
@@ -247,8 +251,8 @@ test("backup and restore are exposed through MCP tools", () => {
     },
   });
 
-  const listed = handleMcpMessage(context, { jsonrpc: "2.0", id: 3, method: "tools/list", params: {} });
-  const backup = handleMcpMessage(context, {
+  const listed = await handleMcpMessage(context, { jsonrpc: "2.0", id: 3, method: "tools/list", params: {} });
+  const backup = await handleMcpMessage(context, {
     jsonrpc: "2.0",
     id: 4,
     method: "tools/call",
@@ -259,40 +263,40 @@ test("backup and restore are exposed through MCP tools", () => {
   const fresh = createMcpContext({
     memory: { bitCount: 128, hyperDim: 256 },
   });
-  const restored = handleMcpMessage(fresh, {
+  const restored = await handleMcpMessage(fresh, {
     jsonrpc: "2.0",
     id: 5,
     method: "tools/call",
     params: { name: "chl_restore_binary", arguments: { backupBase64: backupPayload.data, replace: true } },
   });
 
-  const snapshot = handleMcpMessage(fresh, {
+  const snapshot = await handleMcpMessage(fresh, {
     jsonrpc: "2.0",
     id: 6,
     method: "tools/call",
     params: { name: "chl_state", arguments: {} },
   });
   const statePayload = JSON.parse(snapshot.result.content[0].text);
-  const infer = handleMcpMessage(fresh, {
+  const infer = await handleMcpMessage(fresh, {
     jsonrpc: "2.0",
     id: 7,
     method: "tools/call",
     params: { name: "chl_infer", arguments: { query: "El gato duerme en la mesa", topK: 1 } },
   });
-  const learn = handleMcpMessage(fresh, {
+  const learn = await handleMcpMessage(fresh, {
     jsonrpc: "2.0",
     id: 8,
     method: "tools/call",
     params: { name: "chl_learn", arguments: { input: "El gato duerme sobre la mesa", reward: 1 } },
   });
-  const recall = handleMcpMessage(fresh, {
+  const recall = await handleMcpMessage(fresh, {
     jsonrpc: "2.0",
     id: 9,
     method: "tools/call",
     params: { name: "chl_recall", arguments: { query: "mesa", topK: 1 } },
   });
-  const resources = handleMcpMessage(fresh, { jsonrpc: "2.0", id: 10, method: "resources/list", params: {} });
-  const resourceRead = handleMcpMessage(fresh, { jsonrpc: "2.0", id: 11, method: "resources/read", params: { uri: "chl://memory" } });
+  const resources = await handleMcpMessage(fresh, { jsonrpc: "2.0", id: 10, method: "resources/list", params: {} });
+  const resourceRead = await handleMcpMessage(fresh, { jsonrpc: "2.0", id: 11, method: "resources/read", params: { uri: "chl://memory" } });
   const entriesPayload = JSON.parse(resourceRead.result.contents[0].text);
   const inferPayload = JSON.parse(infer.result.content[0].text);
   const recallPayload = JSON.parse(recall.result.content[0].text);
@@ -363,7 +367,7 @@ test("HTTP exposes the learned lexicon for inspection and export", async () => {
   assert.ok(combinedResponse.body.includes("# phrases"));
 });
 
-test("MCP exposes the learned lexicon for inspection and export", () => {
+test("MCP exposes the learned lexicon for inspection and export", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chl-mcp-lexicon-"));
   const persistPath = path.join(dir, "memory.log");
   const conceptsPath = path.join(dir, "memory.concepts.tsv");
@@ -392,19 +396,19 @@ test("MCP exposes the learned lexicon for inspection and export", () => {
     },
   });
 
-  const tool = handleMcpMessage(context, {
+  const tool = await handleMcpMessage(context, {
     jsonrpc: "2.0",
     id: 20,
     method: "tools/call",
     params: { name: "chl_lexicon", arguments: {} },
   });
-  const exportTool = handleMcpMessage(context, {
+  const exportTool = await handleMcpMessage(context, {
     jsonrpc: "2.0",
     id: 21,
     method: "tools/call",
     params: { name: "chl_lexicon_export", arguments: {} },
   });
-  const resource = handleMcpMessage(context, {
+  const resource = await handleMcpMessage(context, {
     jsonrpc: "2.0",
     id: 22,
     method: "resources/read",
@@ -420,20 +424,20 @@ test("MCP exposes the learned lexicon for inspection and export", () => {
   assert.ok(resource.result.contents[0].text.includes("# phrases"));
 });
 
-test("MCP exposes the active memory profile", () => {
+test("MCP exposes the active memory profile", async () => {
   const context = createMcpContext({
     profile: "large",
     memory: { bitCount: 128, hyperDim: 256 },
   });
 
-  const response = handleMcpMessage(context, {
+  const response = await handleMcpMessage(context, {
     jsonrpc: "2.0",
     id: 12,
     method: "tools/call",
     params: { name: "chl_profile", arguments: {} },
   });
   const toolPayload = JSON.parse(response.result.content[0].text);
-  const resource = handleMcpMessage(context, {
+  const resource = await handleMcpMessage(context, {
     jsonrpc: "2.0",
     id: 13,
     method: "resources/read",
