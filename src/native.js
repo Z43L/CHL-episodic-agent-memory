@@ -18,15 +18,21 @@ function loadBinding() {
     path.resolve(__dirname, "..", "build", "Release", "chl_addon.node"),
     path.resolve(__dirname, "..", "build", "Debug", "chl_addon.node"),
   ];
+  let lastError = null;
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {
-      return require(candidate);
+      try {
+        return { binding: require(candidate), error: null };
+      } catch (error) {
+        lastError = error;
+      }
     }
   }
-  return null;
+  return { binding: null, error: lastError };
 }
 
-const binding = loadBinding();
+const bindingState = loadBinding();
+const binding = bindingState.binding;
 
 class NativeCHL {
   constructor(options = {}) {
@@ -35,12 +41,13 @@ class NativeCHL {
       persistPath: options.persistPath ?? null,
       seed: options.seed ?? 0,
     });
-    this.persistPath = this.options.persistPath;
+    this.persistPath = this._normalizePersistPath(this.options.persistPath);
     this.conceptsPath = this.options.conceptsPath ?? this._deriveSidecarPath(".concepts.tsv");
     this.phrasesPath = this.options.phrasesPath ?? this._deriveSidecarPath(".phrases.tsv");
     this._hydrating = false;
     this._journal = [];
     this._readyError = null;
+    this._nativeLoadError = bindingState.error ?? null;
     this.fallback = null;
     this._syncLexiconEnv();
     if (binding) {
@@ -66,6 +73,18 @@ class NativeCHL {
   _ensurePersistDir() {
     if (!this.persistPath) return;
     fs.mkdirSync(path.dirname(this.persistPath), { recursive: true });
+  }
+
+  _normalizePersistPath(persistPath) {
+    if (!persistPath) return null;
+    try {
+      if (fs.existsSync(persistPath) && fs.statSync(persistPath).isDirectory()) {
+        return path.join(persistPath, "chl-memory.log");
+      }
+    } catch {
+      // fall through and keep provided path
+    }
+    return persistPath;
   }
 
   _deriveSidecarPath(suffix) {

@@ -1,7 +1,7 @@
 const fs = require("node:fs");
-const { NativeCHL } = require("./native");
 const { resolveMemoryProfile } = require("./profiles");
 const { serializePairList } = require("./concepts");
+const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 function createMcpContext(options = {}) {
   const memoryOptions = resolveMemoryProfile({
@@ -12,8 +12,14 @@ function createMcpContext(options = {}) {
       process.env.CHL_PERSIST_PATH ??
       null,
   });
+  const deferMemoryInit = options.deferMemoryInit === true;
+  const createMemory = () => {
+    const { NativeCHL } = require("./native");
+    return new NativeCHL(memoryOptions);
+  };
   return {
-    memory: new NativeCHL(memoryOptions),
+    memory: deferMemoryInit ? null : createMemory(),
+    _createMemory: createMemory,
     serverInfo: {
       name: "chl-memory",
       version: "0.1.0",
@@ -22,6 +28,9 @@ function createMcpContext(options = {}) {
 }
 
 async function ensureMemoryReady(context) {
+  if (context && !context.memory && typeof context._createMemory === "function") {
+    context.memory = context._createMemory();
+  }
   if (context?.memory && typeof context.memory.whenReady === "function") {
     await context.memory.whenReady();
   }
@@ -456,17 +465,33 @@ function handleMcpMessage(context, message) {
   if (!message || typeof message !== "object") return null;
 
   if (message.method === "initialize") {
+    const requestedVersion = message.params?.protocolVersion;
+    const negotiatedVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requestedVersion)
+      ? requestedVersion
+      : SUPPORTED_PROTOCOL_VERSIONS[0];
     return {
       jsonrpc: "2.0",
       id: message.id,
       result: {
-        protocolVersion: "2024-11-05",
+        protocolVersion: negotiatedVersion,
         capabilities: {
           tools: { listChanged: false },
           resources: { listChanged: false, subscribe: false },
         },
         serverInfo: context.serverInfo,
       },
+    };
+  }
+
+  if (message.method === "notifications/initialized" || message.method === "initialized") {
+    return null;
+  }
+
+  if (message.method === "shutdown") {
+    return {
+      jsonrpc: "2.0",
+      id: message.id,
+      result: {},
     };
   }
 

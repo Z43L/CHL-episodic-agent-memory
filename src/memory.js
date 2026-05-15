@@ -8,7 +8,7 @@ const {
   similarity,
   vectorFromSeed,
 } = require("./hypervector");
-const { clamp, charNgrams, tokenize, wordsToHex } = require("./utils");
+const { clamp, charNgrams, normalizeText, tokenize, wordsToHex } = require("./utils");
 const crypto = require("crypto");
 
 function makeBandKey(words, bandIndex, wordsPerBand) {
@@ -286,7 +286,7 @@ class AssociativeMemory {
 
   insert(input, payload = null, metadata = {}) {
     const entry = this.makeEntry(input, payload, metadata);
-    const candidates = this._candidateEntries(entry.hash);
+    const candidates = this._candidateEntries(entry.representations, entry.hash);
     const merged = candidates.find((candidate) => {
       const sim = 1 - hammingDistance(candidate.hash, entry.hash) / this.bitCount;
       return sim >= this.minMergeSimilarity;
