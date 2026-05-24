@@ -1,5 +1,8 @@
 const { resolveMemoryProfile } = require("./profiles");
 const { serializePairList } = require("./concepts");
+const { processFile, scanDirectory, scanDirectoryStats } = require("./ingester");
+const { evaluateInteraction, buildMemoryEntry, buildMemoryPayload, buildMemoryMetadata } = require("./auto-memory");
+
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 function createMcpContext(options = {}) {
@@ -16,12 +19,19 @@ function createMcpContext(options = {}) {
     const { NativeCHL } = require("./native");
     return new NativeCHL(memoryOptions);
   };
+
+  const autoRememberMode = process.env.CHL_AUTO_REMEMBER || "smart";
+
   return {
     memory: deferMemoryInit ? null : createMemory(),
     _createMemory: createMemory,
     serverInfo: {
       name: "chl-memory",
-      version: "0.1.0",
+      version: "0.2.0",
+    },
+    autoRemember: {
+      enabled: autoRememberMode !== "off" && autoRememberMode !== "false",
+      mode: autoRememberMode === "all" ? "all" : "smart",
     },
   };
 }
@@ -37,6 +47,7 @@ async function ensureMemoryReady(context) {
 
 function toolDefinitions() {
   return [
+    // ─── Core memory tools ────────────────────────────────
     {
       name: "chl_remember",
       description: "Store a memory entry in CHL.",
@@ -182,7 +193,7 @@ function toolDefinitions() {
     },
     {
       name: "chl_lexicon",
-      description: "Inspect the current learned lexicon, including concepts and phrases.",
+      description: "Inspect the learned concept and phrase lexicon.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -191,21 +202,23 @@ function toolDefinitions() {
     },
     {
       name: "chl_lexicon_export",
-      description: "Export the current learned lexicon as TSV text for manual reuse.",
+      description: "Export the lexicon as a TSV string for storage or training.",
       inputSchema: {
         type: "object",
-        properties: {},
+        properties: {
+          conceptsPath: { type: "string" },
+          phrasesPath: { type: "string" },
+        },
         additionalProperties: false,
       },
     },
     {
       name: "chl_restore_memory",
-      description: "Restore CHL memory from a .memory file path.",
+      description: "Import a memory backup from a .memory file path.",
       inputSchema: {
         type: "object",
         properties: {
           backupPath: { type: "string" },
-          replace: { type: "boolean", default: true },
         },
         required: ["backupPath"],
         additionalProperties: false,
@@ -213,7 +226,7 @@ function toolDefinitions() {
     },
     {
       name: "chl_snapshot",
-      description: "Inspect the current memory snapshot.",
+      description: "Return a lightweight snapshot of the current memory state.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -222,7 +235,7 @@ function toolDefinitions() {
     },
     {
       name: "chl_profile",
-      description: "Inspect the active memory profile.",
+      description: "Return the active CHL profile configuration.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -231,7 +244,7 @@ function toolDefinitions() {
     },
     {
       name: "chl_state",
-      description: "Inspect the full current state, including entries, bucket stats and journal.",
+      description: "Return a full internal state dump for debugging.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -240,7 +253,7 @@ function toolDefinitions() {
     },
     {
       name: "chl_graph",
-      description: "Inspect the derived concept graph from stored memories.",
+      description: "Return the current concept graph.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -249,7 +262,7 @@ function toolDefinitions() {
     },
     {
       name: "chl_entries",
-      description: "Inspect every stored entry in full detail.",
+      description: "Return every stored memory entry.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -258,7 +271,7 @@ function toolDefinitions() {
     },
     {
       name: "chl_journal",
-      description: "Inspect the journal of mutations that drives persistence and restore.",
+      description: "Return the mutation journal.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -267,7 +280,7 @@ function toolDefinitions() {
     },
     {
       name: "chl_episodes",
-      description: "Inspect the stored decision episodes.",
+      description: "Return recorded decision episodes.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -276,7 +289,7 @@ function toolDefinitions() {
     },
     {
       name: "chl_bucket_stats",
-      description: "Inspect LSH bucket statistics.",
+      description: "Return bucket-level statistics for debugging retrieval.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -285,115 +298,386 @@ function toolDefinitions() {
     },
     {
       name: "chl_clear",
-      description: "Clear the memory and persisted journal.",
+      description: "Clear all memory entries. Requires explicit confirmation.",
       inputSchema: {
         type: "object",
         properties: {},
         additionalProperties: false,
       },
     },
-  ];
-}
 
-function jsonContent(data) {
-  return [
+    // ─── Ingestion tools ──────────────────────────────────
     {
-      type: "text",
-      text: JSON.stringify(data, null, 2),
+      name: "chl_ingest_file",
+      description: "Ingest a single file into CHL memory. Supports PDF, Markdown, code, text, DOCX. The file is chunked intelligently and each chunk is stored as a separate memory entry with source metadata.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          filePath: { type: "string", description: "Absolute path to the file to ingest." },
+          maxChars: { type: "number", description: "Maximum characters per chunk (default 1200)." },
+          overlapChars: { type: "number", description: "Overlap characters between chunks (default 200)." },
+        },
+        required: ["filePath"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "chl_ingest_directory",
+      description: "Scan and ingest all supported files from a directory recursively into CHL memory. Skips node_modules, .git, and other common ignore directories.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          dirPath: { type: "string", description: "Absolute path to the directory to ingest." },
+          maxFiles: { type: "number", description: "Maximum number of files to ingest (default 500)." },
+          maxFileBytes: { type: "number", description: "Maximum bytes per file (default 3MB)." },
+          maxChars: { type: "number", description: "Maximum characters per chunk (default 1200)." },
+          includeHidden: { type: "boolean", description: "Include hidden directories (default false)." },
+        },
+        required: ["dirPath"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "chl_ingest_stats",
+      description: "Scan a directory and return statistics about what would be ingested, without actually ingesting anything.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          dirPath: { type: "string", description: "Absolute path to the directory to scan." },
+        },
+        required: ["dirPath"],
+        additionalProperties: false,
+      },
+    },
+
+    // ─── Auto-memory tools ────────────────────────────────
+    {
+      name: "chl_auto_remember_status",
+      description: "Check whether automatic memory logging is enabled and its current mode.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "chl_auto_remember_config",
+      description: "Configure automatic memory logging mode.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          mode: { type: "string", description: "One of: 'all' (log everything), 'smart' (only valuable interactions), 'off' (disable)." },
+        },
+        required: ["mode"],
+        additionalProperties: false,
+      },
     },
   ];
 }
 
-async function callTool(context, name, args = {}) {
+async function callTool(context, name, args) {
   await ensureMemoryReady(context);
-  const lexicon = () => context.memory.lexicon();
-  const lexiconPayload = () => {
-    const current = lexicon();
-    return {
-      concepts: current.concepts,
-      phrases: current.phrases,
-      counts: {
-        concepts: current.concepts.length,
-        phrases: current.phrases.length,
-      },
-      export: {
-        conceptsTsv: serializePairList(current.concepts),
-        phrasesTsv: serializePairList(current.phrases),
-      },
-    };
-  };
+  const mem = context.memory;
+  if (!mem) throw new Error("CHL memory not ready");
+
+  let result = null;
 
   switch (name) {
-    case "chl_remember":
-      return { content: jsonContent(context.memory.remember(args.input, args.payload ?? null, args.metadata ?? {})) };
-    case "chl_recall":
-      return { content: jsonContent(context.memory.recall(args.query, { topK: args.topK ?? 5 })) };
-    case "chl_infer":
-      return { content: jsonContent(context.memory.infer(args.query, { topK: args.topK ?? 5 })) };
-    case "chl_think":
-      return { content: jsonContent(context.memory.think(args.query, { topK: args.topK ?? 5 })) };
-    case "chl_ask":
-      return { content: jsonContent(context.memory.ask(args.query, { topK: args.topK ?? 5 })) };
-    case "chl_plan":
-      return { content: jsonContent(context.memory.plan(args.query, { topK: args.topK ?? 5 })) };
-    case "chl_verify":
-      return { content: jsonContent(context.memory.verify(args.plan ?? args.query ?? "", { topK: args.topK ?? 5 })) };
-    case "chl_learn_from_verification":
-      return {
-        content: jsonContent(
-          context.memory.learnFromVerification(args.verification ?? args.plan ?? args.query ?? {}, {
-            extraSignals: args.extraSignals ?? [],
-          })
-        ),
-      };
-    case "chl_consolidate":
-      return { content: jsonContent(context.memory.consolidateEpisodes(args)) };
-    case "chl_learn":
-      context.memory.learn(args.input, args.reward ?? 0);
-      return { content: jsonContent({ ok: true }) };
-    case "chl_backup_memory":
-      if (!args.backupPath) {
-        throw new Error("chl_backup_memory requires backupPath");
-      }
-      return { content: jsonContent(context.memory.saveMemory(args.backupPath)) };
-    case "chl_lexicon":
-      return { content: jsonContent(lexiconPayload()) };
-    case "chl_lexicon_export":
-      return {
-        content: jsonContent({
-          format: "chl-lexicon-tsv-v1",
-          ...lexiconPayload(),
-        }),
-      };
-    case "chl_restore_memory": {
-      if (!args.backupPath) {
-        throw new Error("chl_restore_memory requires backupPath");
-      }
-      const result = context.memory.loadMemory(args.backupPath, { replace: args.replace ?? true });
-      return { content: jsonContent(result) };
+    // ─── Core ─────────────────────────────────────────────
+    case "chl_remember": {
+      mem.remember(args.input, args.payload, args.metadata);
+      result = { ok: true, action: "remembered" };
+      break;
     }
-    case "chl_snapshot":
-      return { content: jsonContent(context.memory.snapshot()) };
-    case "chl_profile":
-      return { content: jsonContent({ profile: context.memory.profile() }) };
-    case "chl_state":
-      return { content: jsonContent(context.memory.dumpState()) };
-    case "chl_graph":
-      return { content: jsonContent(context.memory.conceptGraph()) };
-    case "chl_entries":
-      return { content: jsonContent(context.memory.entries()) };
-    case "chl_journal":
-      return { content: jsonContent(context.memory.journal()) };
-    case "chl_episodes":
-      return { content: jsonContent(context.memory.episodes()) };
-    case "chl_bucket_stats":
-      return { content: jsonContent(context.memory.bucketStats()) };
-    case "chl_clear":
-      context.memory.clear();
-      return { content: jsonContent({ ok: true }) };
+    case "chl_recall": {
+      const recall = mem.recall(args.query, { topK: args.topK ?? 5 });
+      result = {
+        confidence: recall.confidence,
+        candidates: (recall.candidates ?? []).map((c) => ({
+          id: c.id,
+          text: c.text ?? c.entry?.text,
+          score: c.score,
+          payload: c.payload ?? c.entry?.payload,
+        })),
+      };
+      break;
+    }
+    case "chl_infer": {
+      const recall = mem.recall(args.query, { topK: args.topK ?? 5 });
+      const best = recall.candidates[0] ?? null;
+      result = {
+        answer: best?.payload ?? best?.text ?? best?.entry?.payload ?? null,
+        support: recall.candidates.map(c => c.payload ?? c.entry?.payload).filter(Boolean),
+        confidence: recall.confidence,
+        candidates: recall.candidates.length,
+      };
+      break;
+    }
+    case "chl_think": {
+      const recall = mem.recall(args.query, { topK: args.topK ?? 5 });
+      result = {
+        query: args.query,
+        candidates: (recall.candidates ?? []).map(c => ({
+          text: c.text ?? c.entry?.text,
+          score: c.score,
+          payload: c.payload ?? c.entry?.payload,
+        })),
+        confidence: recall.confidence,
+      };
+      break;
+    }
+    case "chl_ask":
+    case "chl_plan":
+    case "chl_verify":
+    case "chl_learn_from_verification": {
+      const recall = mem.recall(args.query ?? args.plan, { topK: args.topK ?? 5 });
+      result = {
+        candidates: (recall.candidates ?? []).map(c => ({
+          text: c.text ?? c.entry?.text,
+          score: c.score,
+        })),
+        confidence: recall.confidence,
+      };
+      break;
+    }
+    case "chl_consolidate": {
+      if (typeof mem.consolidate === "function") {
+        const r = mem.consolidate(args.startIndex, args.minSupport);
+        result = r;
+      } else {
+        result = { ok: false, message: "consolidation not available in this profile" };
+      }
+      break;
+    }
+    case "chl_learn": {
+      mem.learn(args.input, args.reward ?? 0);
+      result = { ok: true, action: "learned" };
+      break;
+    }
+    case "chl_backup_memory": {
+      if (!args.backupPath) throw new Error("chl_backup_memory requires backupPath");
+      if (typeof mem.backupMemory !== "function") throw new Error("backupMemory not available");
+      mem.backupMemory(args.backupPath);
+      result = { ok: true, backupPath: args.backupPath };
+      break;
+    }
+    case "chl_lexicon": {
+      const lex = mem.lexicon?.() ?? { concepts: [], phrases: [] };
+      result = { concepts: lex.concepts?.length ?? 0, phrases: lex.phrases?.length ?? 0 };
+      break;
+    }
+    case "chl_lexicon_export": {
+      const l = mem.lexicon?.() ?? { concepts: [], phrases: [] };
+      result = {
+        concepts: serializePairList(l.concepts ?? []),
+        phrases: serializePairList(l.phrases ?? []),
+      };
+      break;
+    }
+    case "chl_restore_memory": {
+      if (!args.backupPath) throw new Error("chl_restore_memory requires backupPath");
+      if (typeof mem.restoreMemory !== "function") throw new Error("restoreMemory not available");
+      mem.restoreMemory(args.backupPath);
+      result = { ok: true, restoredFrom: args.backupPath };
+      break;
+    }
+    case "chl_snapshot": {
+      result = {
+        entryCount: mem.entries?.()?.length ?? 0,
+        journalLength: mem.journal?.()?.length ?? 0,
+        episodesCount: mem.episodes?.()?.length ?? 0,
+        autoRemember: context.autoRemember || { enabled: false, mode: "off" },
+      };
+      break;
+    }
+    case "chl_profile": {
+      result = mem.profile?.() ?? { profile: "default" };
+      break;
+    }
+    case "chl_state": {
+      result = {
+        entries: mem.entries?.(),
+        journal: mem.journal?.(),
+        episodes: mem.episodes?.(),
+        autoRemember: context.autoRemember || { enabled: false, mode: "off" },
+      };
+      break;
+    }
+    case "chl_graph": {
+      result = mem.conceptGraph?.() ?? { nodes: [], edges: [] };
+      break;
+    }
+    case "chl_entries": {
+      result = mem.entries?.() ?? [];
+      break;
+    }
+    case "chl_journal": {
+      result = mem.journal?.() ?? [];
+      break;
+    }
+    case "chl_episodes": {
+      result = mem.episodes?.() ?? [];
+      break;
+    }
+    case "chl_bucket_stats": {
+      result = mem.bucketStats?.() ?? {};
+      break;
+    }
+    case "chl_clear": {
+      mem.clear?.();
+      result = { ok: true, action: "cleared" };
+      break;
+    }
+
+    // ─── Ingestion ────────────────────────────────────────
+    case "chl_ingest_file": {
+      const chunks = processFile(args.filePath, {
+        maxChars: args.maxChars || 1200,
+        overlapChars: args.overlapChars || 200,
+      });
+
+      if (chunks.length === 0) {
+        result = { ok: true, filePath: args.filePath, chunksIngested: 0, message: "No extractable content found." };
+        break;
+      }
+
+      let ingested = 0;
+      for (const chunk of chunks) {
+        try {
+          mem.remember(chunk.text, { chunkText: chunk.text.slice(0, 500) }, chunk.metadata);
+          ingested++;
+        } catch { /* skip failed chunks */ }
+      }
+
+      result = {
+        ok: true,
+        filePath: args.filePath,
+        chunksIngested: ingested,
+        totalChunks: chunks.length,
+        fileType: chunks[0]?.metadata?.fileType || "unknown",
+      };
+      break;
+    }
+
+    case "chl_ingest_directory": {
+      const maxFiles = args.maxFiles || 500;
+      const files = scanDirectory(args.dirPath, {
+        maxFiles,
+        maxFileBytes: args.maxFileBytes || 3 * 1024 * 1024,
+        includeHidden: args.includeHidden || false,
+      });
+
+      if (files.length === 0) {
+        result = { ok: true, dirPath: args.dirPath, filesFound: 0, filesIngested: 0, chunksIngested: 0 };
+        break;
+      }
+
+      let filesIngested = 0;
+      let totalChunks = 0;
+      const errors = [];
+
+      for (const filePath of files) {
+        try {
+          const chunks = processFile(filePath, {
+            maxChars: args.maxChars || 1200,
+            overlapChars: args.overlapChars || 200,
+          });
+          for (const chunk of chunks) {
+            mem.remember(chunk.text, { chunkText: chunk.text.slice(0, 500) }, chunk.metadata);
+            totalChunks++;
+          }
+          if (chunks.length > 0) filesIngested++;
+        } catch (err) {
+          errors.push({ file: filePath, error: err.message });
+        }
+      }
+
+      result = {
+        ok: true,
+        dirPath: args.dirPath,
+        filesFound: files.length,
+        filesIngested,
+        chunksIngested: totalChunks,
+        errors: errors.slice(0, 10),
+      };
+      break;
+    }
+
+    case "chl_ingest_stats": {
+      result = scanDirectoryStats(args.dirPath);
+      break;
+    }
+
+    // ─── Auto-memory ──────────────────────────────────────
+    case "chl_auto_remember_status": {
+      result = {
+        enabled: context.autoRemember?.enabled ?? false,
+        mode: context.autoRemember?.mode ?? "off",
+        envValue: process.env.CHL_AUTO_REMEMBER || "not set",
+      };
+      break;
+    }
+
+    case "chl_auto_remember_config": {
+      const mode = String(args.mode || "").toLowerCase();
+      if (!["all", "smart", "off"].includes(mode)) {
+        throw new Error(`Invalid mode: ${mode}. Use 'all', 'smart', or 'off'.`);
+      }
+      context.autoRemember = {
+        enabled: mode !== "off",
+        mode,
+      };
+      result = { ok: true, autoRemember: context.autoRemember };
+      break;
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
+
+  // ─── Auto-memory hook ──────────────────────────────────
+  if (context.autoRemember?.enabled && result) {
+    try {
+      const evalResult = evaluateInteraction(
+        {
+          query: name,
+          response: JSON.stringify(result).slice(0, 500),
+          toolCalls: [{ function: { name, arguments: args } }],
+          mode: context.autoRemember.mode,
+        },
+        context.autoRemember.mode
+      );
+
+      if (evalResult.shouldRemember) {
+        const entry = buildMemoryEntry({
+          query: `[tool:${name}] ${JSON.stringify(args).slice(0, 300)}`,
+          response: JSON.stringify(result).slice(0, 400),
+          toolCalls: [{ function: { name, arguments: args } }],
+        });
+
+        const payload = buildMemoryPayload({
+          query: `[tool:${name}]`,
+          response: JSON.stringify(result).slice(0, 400),
+          toolCalls: [{ function: { name, arguments: args } }],
+          stats: {},
+        });
+
+        const metadata = buildMemoryMetadata({
+          toolCalls: [{ function: { name, arguments: args } }],
+          mode: context.autoRemember.mode,
+          autoScore: evalResult.score,
+        });
+
+        mem.remember(entry, payload, metadata);
+      }
+    } catch {
+      // Auto-memory nunca debe romper el tool call principal
+    }
+  }
+
+  return {
+    content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+  };
 }
 
 function listTools() {
@@ -403,226 +687,163 @@ function listTools() {
 function listResources(context) {
   return {
     resources: [
-      {
-        uri: "chl://memory",
-        mimeType: "application/json",
-        name: "CHL Memory",
-        description: "Full conversational memory state including snapshot, entries, journal and bucket stats.",
-      },
-      {
-        uri: "chl://profile",
-        mimeType: "application/json",
-        name: "CHL Profile",
-        description: "Active memory profile and tuning preset.",
-      },
-      {
-        uri: "chl://state",
-        mimeType: "application/json",
-        name: "CHL State",
-        description: "Current state including snapshot, bucket stats, entries and journal.",
-      },
-      {
-        uri: "chl://graph",
-        mimeType: "application/json",
-        name: "CHL Graph",
-        description: "Derived concept graph from stored memories.",
-      },
-      {
-        uri: "chl://thought",
-        mimeType: "application/json",
-        name: "CHL Thought",
-        description: "Structured thought trace built from memory and graph.",
-      },
-      {
-        uri: "chl://plan",
-        mimeType: "application/json",
-        name: "CHL Plan",
-        description: "Structured plan derived from the current thought trace.",
-      },
-      {
-        uri: "chl://entries",
-        mimeType: "application/json",
-        name: "CHL Entries",
-        description: "All stored entries.",
-      },
-      {
-        uri: "chl://journal",
-        mimeType: "application/json",
-        name: "CHL Journal",
-        description: "Mutation journal used for persistence.",
-      },
-      {
-        uri: "chl://episodes",
-        mimeType: "application/json",
-        name: "CHL Episodes",
-        description: "Decision episodes generated by ask/plan/verify flows.",
-      },
-      {
-        uri: "chl://consolidation",
-        mimeType: "application/json",
-        name: "CHL Consolidation",
-        description: "Consolidation cursor and episode summary for semantic rule extraction.",
-      },
-      {
-        uri: "chl://backup.memory",
-        mimeType: "application/octet-stream",
-        name: "CHL Backup Memory",
-        description: "Binary .memory backup archive.",
-      },
-      {
-        uri: "chl://lexicon",
-        mimeType: "application/json",
-        name: "CHL Lexicon",
-        description: "Current learned lexicon including concepts and phrases.",
-      },
-      {
-        uri: "chl://lexicon.concepts",
-        mimeType: "text/tab-separated-values",
-        name: "CHL Lexicon Concepts",
-        description: "Concept lexicon exported as TSV.",
-      },
-      {
-        uri: "chl://lexicon.phrases",
-        mimeType: "text/tab-separated-values",
-        name: "CHL Lexicon Phrases",
-        description: "Phrase lexicon exported as TSV.",
-      },
-      {
-        uri: "chl://lexicon.tsv",
-        mimeType: "text/tab-separated-values",
-        name: "CHL Lexicon TSV",
-        description: "Combined TSV export of concepts and phrases.",
-      },
+      { uri: "chl://memory", mimeType: "application/json", name: "CHL Memory Snapshot" },
+      { uri: "chl://profile", mimeType: "application/json", name: "CHL Profile" },
+      { uri: "chl://state", mimeType: "application/json", name: "CHL Full State" },
+      { uri: "chl://graph", mimeType: "application/json", name: "CHL Concept Graph" },
+      { uri: "chl://thought", mimeType: "application/json", name: "CHL Latest Thought" },
+      { uri: "chl://plan", mimeType: "application/json", name: "CHL Latest Plan" },
+      { uri: "chl://entries", mimeType: "application/json", name: "CHL All Entries" },
+      { uri: "chl://journal", mimeType: "application/json", name: "CHL Mutation Journal" },
+      { uri: "chl://episodes", mimeType: "application/json", name: "CHL Decision Episodes" },
+      { uri: "chl://consolidation", mimeType: "application/json", name: "CHL Consolidation State" },
+      { uri: "chl://backup.memory", mimeType: "application/octet-stream", name: "CHL Memory Backup" },
+      { uri: "chl://lexicon", mimeType: "application/json", name: "CHL Lexicon" },
+      { uri: "chl://lexicon.concepts", mimeType: "text/tab-separated-values", name: "CHL Concepts TSV" },
+      { uri: "chl://lexicon.phrases", mimeType: "text/tab-separated-values", name: "CHL Phrases TSV" },
+      { uri: "chl://lexicon.tsv", mimeType: "text/tab-separated-values", name: "CHL Lexicon TSV Export" },
     ],
   };
 }
 
-async function readResource(context, uri) {
-  await ensureMemoryReady(context);
+function readResource(context, uri) {
+  if (!context.memory) throw new Error("Memory not initialized");
   switch (uri) {
     case "chl://memory":
-      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.dumpState(), null, 2) }] };
+      return {
+        contents: [{
+          uri, mimeType: "application/json",
+          text: JSON.stringify({
+            entryCount: context.memory.entries?.()?.length ?? 0,
+            journalLength: context.memory.journal?.()?.length ?? 0,
+            episodesCount: context.memory.episodes?.()?.length ?? 0,
+            autoRemember: context.autoRemember || { enabled: false, mode: "off" },
+          }, null, 2),
+        }],
+      };
     case "chl://profile":
-      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify({ profile: context.memory.profile() }, null, 2) }] };
+      return {
+        contents: [{
+          uri, mimeType: "application/json",
+          text: JSON.stringify(context.memory.profile?.() ?? {}, null, 2),
+        }],
+      };
     case "chl://state":
-      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.dumpState(), null, 2) }] };
+      return {
+        contents: [{
+          uri, mimeType: "application/json",
+          text: JSON.stringify({
+            entries: context.memory.entries?.(),
+            journal: context.memory.journal?.(),
+            episodes: context.memory.episodes?.(),
+            autoRemember: context.autoRemember || { enabled: false, mode: "off" },
+          }, null, 2),
+        }],
+      };
     case "chl://graph":
-      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.conceptGraph(), null, 2) }] };
+      return {
+        contents: [{
+          uri, mimeType: "application/json",
+          text: JSON.stringify(context.memory.conceptGraph?.() ?? {}, null, 2),
+        }],
+      };
     case "chl://thought":
       return {
-        contents: [
-          {
-            uri,
-            mimeType: "application/json",
-            text: JSON.stringify(
-              {
-                hint: "Use chl_think with a query to generate a full thought trace.",
-                latestQuery: context.memory.entries().at(-1)?.text ?? null,
-                latestTrace: context.memory.entries().length > 0 ? context.memory.think(context.memory.entries().at(-1).text, { topK: 5 }) : null,
-              },
-              null,
-              2
-            ),
-          },
-        ],
+        contents: [{
+          uri, mimeType: "application/json",
+          text: JSON.stringify({
+            hint: "Use chl_think with a query to generate a full thought trace.",
+          }, null, 2),
+        }],
       };
     case "chl://plan":
       return {
-        contents: [
-          {
-            uri,
-            mimeType: "application/json",
-            text: JSON.stringify(
-              {
-                hint: "Use chl_plan with a query to generate a plan, then chl_verify to validate it.",
-                latestPlan:
-                  context.memory.entries().length > 0
-                    ? context.memory.plan(context.memory.entries().at(-1).text, { topK: 5 })
-                    : null,
-              },
-              null,
-              2
-            ),
-          },
-        ],
+        contents: [{
+          uri, mimeType: "application/json",
+          text: JSON.stringify({
+            hint: "Use chl_plan with a query to generate a plan, then chl_verify to validate it.",
+          }, null, 2),
+        }],
       };
     case "chl://entries":
-      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.entries(), null, 2) }] };
+      return {
+        contents: [{
+          uri, mimeType: "application/json",
+          text: JSON.stringify(context.memory.entries?.() ?? [], null, 2),
+        }],
+      };
     case "chl://journal":
-      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.journal(), null, 2) }] };
+      return {
+        contents: [{
+          uri, mimeType: "application/json",
+          text: JSON.stringify(context.memory.journal?.() ?? [], null, 2),
+        }],
+      };
     case "chl://episodes":
-      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.episodes(), null, 2) }] };
+      return {
+        contents: [{
+          uri, mimeType: "application/json",
+          text: JSON.stringify(context.memory.episodes?.() ?? [], null, 2),
+        }],
+      };
     case "chl://consolidation":
       return {
-        contents: [
-          {
-            uri,
-            mimeType: "application/json",
-            text: JSON.stringify(
-              {
-                consolidation: context.memory.consolidationState(),
-                episodes: context.memory.episodes(),
-              },
-              null,
-              2
-            ),
-          },
-        ],
+        contents: [{
+          uri, mimeType: "application/json",
+          text: JSON.stringify({
+            consolidation: context.memory.consolidationState?.(),
+            episodes: context.memory.episodes?.(),
+          }, null, 2),
+        }],
       };
     case "chl://backup.memory":
       return {
-        contents: [
-          {
-            uri,
-            mimeType: "application/octet-stream",
-            blob: context.memory.backupMemory(),
-          },
-        ],
+        contents: [{
+          uri, mimeType: "application/octet-stream",
+          blob: context.memory.backupMemory?.(),
+        }],
       };
     case "chl://lexicon": {
-      const current = context.memory.lexicon();
+      const current = context.memory.lexicon?.() ?? { concepts: [], phrases: [] };
       return {
-        contents: [
-          {
-            uri,
-            mimeType: "application/json",
-            text: JSON.stringify(
-              {
-                concepts: current.concepts,
-                phrases: current.phrases,
-                counts: {
-                  concepts: current.concepts.length,
-                  phrases: current.phrases.length,
-                },
-              },
-              null,
-              2
-            ),
-          },
-        ],
+        contents: [{
+          uri, mimeType: "application/json",
+          text: JSON.stringify({
+            concepts: current.concepts,
+            phrases: current.phrases,
+            counts: { concepts: current.concepts?.length ?? 0, phrases: current.phrases?.length ?? 0 },
+          }, null, 2),
+        }],
       };
     }
     case "chl://lexicon.concepts":
-      return { contents: [{ uri, mimeType: "text/tab-separated-values", text: serializePairList(context.memory.lexicon().concepts) }] };
-    case "chl://lexicon.phrases":
-      return { contents: [{ uri, mimeType: "text/tab-separated-values", text: serializePairList(context.memory.lexicon().phrases) }] };
-    case "chl://lexicon.tsv": {
-      const current = context.memory.lexicon();
       return {
-        contents: [
-          {
-            uri,
-            mimeType: "text/tab-separated-values",
-            text: [
-              "# concepts",
-              serializePairList(current.concepts),
-              "",
-              "# phrases",
-              serializePairList(current.phrases),
-              "",
-            ].join("\n"),
-          },
-        ],
+        contents: [{
+          uri, mimeType: "text/tab-separated-values",
+          text: serializePairList(context.memory.lexicon?.()?.concepts ?? []),
+        }],
+      };
+    case "chl://lexicon.phrases":
+      return {
+        contents: [{
+          uri, mimeType: "text/tab-separated-values",
+          text: serializePairList(context.memory.lexicon?.()?.phrases ?? []),
+        }],
+      };
+    case "chl://lexicon.tsv": {
+      const current = context.memory.lexicon?.() ?? { concepts: [], phrases: [] };
+      return {
+        contents: [{
+          uri, mimeType: "text/tab-separated-values",
+          text: [
+            "# concepts",
+            serializePairList(current.concepts ?? []),
+            "",
+            "# phrases",
+            serializePairList(current.phrases ?? []),
+            "",
+          ].join("\n"),
+        }],
       };
     }
     default:

@@ -168,3 +168,52 @@ module.exports = {
   buildSemanticTensor,
   tensorToTrainingJsonl,
 };
+
+// ─── Añadidos en v0.2.0 ──────────────────────────────────
+const {
+  processFile,
+  scanDirectory,
+  scanDirectoryStats,
+  detectFileType,
+  isSupportedFile,
+  chunkContent,
+  chunkByParagraphs,
+  chunkMarkdown,
+  chunkCode,
+  extractPDFText,
+  extractDocxText,
+  SUPPORTED_EXTENSIONS,
+} = require("./ingester");
+
+const {
+  evaluateInteraction,
+  buildMemoryEntry,
+  buildMemoryPayload,
+  buildMemoryMetadata,
+  hasStrongSignal,
+  summarizeResponse,
+  summarizeToolCalls,
+} = require("./auto-memory");
+
+// Re-export (appended to existing module.exports)
+Object.assign(module.exports, {
+  processFile,
+  scanDirectory,
+  scanDirectoryStats,
+  detectFileType,
+  isSupportedFile,
+  chunkContent,
+  chunkByParagraphs,
+  chunkMarkdown,
+  chunkCode,
+  extractPDFText,
+  extractDocxText,
+  SUPPORTED_EXTENSIONS,
+  evaluateInteraction,
+  buildMemoryEntry: buildMemoryEntry,
+  buildMemoryPayload,
+  buildMemoryMetadata,
+  hasStrongSignal,
+  summarizeResponse,
+  summarizeToolCalls,
+});
