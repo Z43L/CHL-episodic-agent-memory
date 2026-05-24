@@ -130,3 +130,15 @@ src/
 ├── mcp-server.js      # Entry point del MCP
 └── ...
 ```
+
+---
+
+## Instalación rápida
+
+```bash
+git clone <repo> ~/CHL-episodic-agent-memory
+cd ~/CHL-episodic-agent-memory
+bash scripts/install.sh
+```
+
+Guía detallada: [INSTALL.md](/Users/davidmoreno/Desktop/CHL-episodic-agent-memory/INSTALL.md)

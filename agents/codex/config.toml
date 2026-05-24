@@ -1,0 +1,49 @@
+# Añade este bloque a ~/.codex/config.toml
+# Sustituye {HOME} por tu ruta home absoluta
+
+[mcp_servers.chl-memory]
+command = "node"
+args = ["{HOME}/CHL-episodic-agent-memory/src/mcp-server.js"]
+startup_timeout_sec = 90
+enabled = true
+
+[mcp_servers.chl-memory.env]
+CHL_PERSIST_PATH = "{HOME}/.codex/chl-memory.log"
+CHL_AUTO_REMEMBER = "smart"
+
+# Opcional: aprobar todas las herramientas sin confirmación
+[mcp_servers.chl-memory.tools.chl_recall]
+approval_mode = "approve"
+
+[mcp_servers.chl-memory.tools.chl_remember]
+approval_mode = "approve"
+
+[mcp_servers.chl-memory.tools.chl_snapshot]
+approval_mode = "approve"
+
+[mcp_servers.chl-memory.tools.chl_infer]
+approval_mode = "approve"
+
+[mcp_servers.chl-memory.tools.chl_think]
+approval_mode = "approve"
+
+[mcp_servers.chl-memory.tools.chl_plan]
+approval_mode = "approve"
+
+[mcp_servers.chl-memory.tools.chl_learn]
+approval_mode = "approve"
+
+[mcp_servers.chl-memory.tools.chl_ingest_file]
+approval_mode = "approve"
+
+[mcp_servers.chl-memory.tools.chl_ingest_directory]
+approval_mode = "approve"
+
+[mcp_servers.chl-memory.tools.chl_auto_remember_status]
+approval_mode = "approve"
+
+[mcp_servers.chl-memory.tools.chl_backup_memory]
+approval_mode = "approve"
+
+[mcp_servers.chl-memory.tools.chl_restore_memory]
+approval_mode = "approve"

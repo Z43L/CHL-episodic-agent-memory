@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "chl-memory": {
+      "command": "node",
+      "args": ["{HOME}/CHL-episodic-agent-memory/src/mcp-server.js"],
+      "env": {
+        "CHL_PERSIST_PATH": "{HOME}/.codex/chl-memory.log",
+        "CHL_AUTO_REMEMBER": "smart"
+      }
+    }
+  }
+}
