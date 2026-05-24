@@ -457,7 +457,7 @@ async function callTool(context, name, args) {
     case "chl_backup_memory": {
       if (!args.backupPath) throw new Error("chl_backup_memory requires backupPath");
       if (typeof mem.backupMemory !== "function") throw new Error("backupMemory not available");
-      mem.backupMemory(args.backupPath);
+      mem.saveMemory(args.backupPath);
       result = { ok: true, backupPath: args.backupPath };
       break;
     }
@@ -477,7 +477,7 @@ async function callTool(context, name, args) {
     case "chl_restore_memory": {
       if (!args.backupPath) throw new Error("chl_restore_memory requires backupPath");
       if (typeof mem.restoreMemory !== "function") throw new Error("restoreMemory not available");
-      mem.restoreMemory(args.backupPath);
+      mem.loadMemory(args.backupPath);
       result = { ok: true, restoredFrom: args.backupPath };
       break;
     }
