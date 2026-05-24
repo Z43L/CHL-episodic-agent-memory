@@ -1,5 +1,6 @@
 const { hammingDistance, semanticHashFromText } = require("./simhash");
 const { conceptualizeTokens: conceptTokens, getPhraseMap } = require("./concepts");
+const { analyzeText } = require("./analysis");
 const {
   bindVectors,
   bundleVectors,
@@ -95,14 +96,10 @@ function setJaccard(a, b) {
 }
 
 function buildRepresentations(text) {
-  const normalizedText = typeof text === "string" ? text : JSON.stringify(text);
-  const canonicalText = canonicalizeText(normalizedText);
-  const tokens = normalizedTokens(canonicalText);
-  const ngrams3 = charNgrams(canonicalText, 3);
-  const ngrams4 = charNgrams(canonicalText, 4);
-  const concepts = conceptualizeTokens(canonicalText);
-  const negated = tokens.some((token) => token === "no" || token === "sin" || token === "nunca" || token === "jamas");
-  return { normalizedText, canonicalText, tokens, ngrams3, ngrams4, concepts, negated };
+  return analyzeText(text, {
+    canonicalizeText,
+    conceptualizeTokens,
+  });
 }
 
 function stringifyPayload(payload) {
@@ -117,11 +114,12 @@ function stringifyPayload(payload) {
 
 function representationSimilarity(queryReps, entryReps) {
   const tokenScore = setJaccard(queryReps.tokens, entryReps.tokens);
+  const sequenceScore = tokenSequenceSimilarity(queryReps.focusTokens, entryReps.focusTokens);
   const ngram3Score = setJaccard(queryReps.ngrams3, entryReps.ngrams3);
   const ngram4Score = setJaccard(queryReps.ngrams4, entryReps.ngrams4);
-  const lexical = 0.3 * tokenScore + 0.4 * ngram3Score + 0.3 * ngram4Score;
+  const lexical = 0.22 * tokenScore + 0.18 * sequenceScore + 0.30 * ngram3Score + 0.30 * ngram4Score;
   const concept = setJaccard(queryReps.concepts, entryReps.concepts);
-  return { lexical, concept, negationMatch: queryReps.negated === entryReps.negated ? 1 : 0 };
+  return { lexical, concept, negationMatch: queryReps.negated === entryReps.negated ? 1 : 0, sequenceScore };
 }
 
 function tokenSequenceSimilarity(a, b) {
@@ -154,8 +152,8 @@ class AssociativeMemory {
     this.bandMaps = [];
     this.textMap = new Map();
     this.canonicalTextMap = new Map();
-    this.tokenMaps = [new Map(), new Map(), new Map(), new Map()];
-    this.payloadTokenMaps = [new Map(), new Map(), new Map(), new Map()];
+    this.tokenMaps = [new Map(), new Map(), new Map(), new Map(), new Map(), new Map()];
+    this.payloadTokenMaps = [new Map(), new Map(), new Map(), new Map(), new Map(), new Map()];
     const { bands, wordsPerBand } = createBands(this.bitCount, this.bandBits);
     this.bandCount = bands;
     this.wordsPerBand = wordsPerBand;
@@ -216,10 +214,14 @@ class AssociativeMemory {
     this._indexTerms(this.tokenMaps[1], entry.representations?.ngrams3 ?? [], entry.id);
     this._indexTerms(this.tokenMaps[2], entry.representations?.ngrams4 ?? [], entry.id);
     this._indexTerms(this.tokenMaps[3], entry.representations?.concepts ?? [], entry.id);
+    this._indexTerms(this.tokenMaps[4], entry.representations?.focusTokens ?? [], entry.id);
+    this._indexTerms(this.tokenMaps[5], entry.representations?.tokenBigrams ?? [], entry.id);
     this._indexTerms(this.payloadTokenMaps[0], entry.payloadRepresentations?.tokens ?? [], entry.id);
     this._indexTerms(this.payloadTokenMaps[1], entry.payloadRepresentations?.ngrams3 ?? [], entry.id);
     this._indexTerms(this.payloadTokenMaps[2], entry.payloadRepresentations?.ngrams4 ?? [], entry.id);
     this._indexTerms(this.payloadTokenMaps[3], entry.payloadRepresentations?.concepts ?? [], entry.id);
+    this._indexTerms(this.payloadTokenMaps[4], entry.payloadRepresentations?.focusTokens ?? [], entry.id);
+    this._indexTerms(this.payloadTokenMaps[5], entry.payloadRepresentations?.tokenBigrams ?? [], entry.id);
   }
 
   unindexEntry(entry) {
@@ -238,10 +240,14 @@ class AssociativeMemory {
     this._unindexTerms(this.tokenMaps[1], entry.representations?.ngrams3 ?? [], entry.id);
     this._unindexTerms(this.tokenMaps[2], entry.representations?.ngrams4 ?? [], entry.id);
     this._unindexTerms(this.tokenMaps[3], entry.representations?.concepts ?? [], entry.id);
+    this._unindexTerms(this.tokenMaps[4], entry.representations?.focusTokens ?? [], entry.id);
+    this._unindexTerms(this.tokenMaps[5], entry.representations?.tokenBigrams ?? [], entry.id);
     this._unindexTerms(this.payloadTokenMaps[0], entry.payloadRepresentations?.tokens ?? [], entry.id);
     this._unindexTerms(this.payloadTokenMaps[1], entry.payloadRepresentations?.ngrams3 ?? [], entry.id);
     this._unindexTerms(this.payloadTokenMaps[2], entry.payloadRepresentations?.ngrams4 ?? [], entry.id);
     this._unindexTerms(this.payloadTokenMaps[3], entry.payloadRepresentations?.concepts ?? [], entry.id);
+    this._unindexTerms(this.payloadTokenMaps[4], entry.payloadRepresentations?.focusTokens ?? [], entry.id);
+    this._unindexTerms(this.payloadTokenMaps[5], entry.payloadRepresentations?.tokenBigrams ?? [], entry.id);
   }
 
   _indexText(map, text, id) {
@@ -368,6 +374,7 @@ class AssociativeMemory {
     this._collectTextCandidates(ids, this.textMap, queryReps.normalizedText);
     this._collectTextCandidates(ids, this.canonicalTextMap, queryReps.canonicalText);
     this._collectTermCandidates(ids, this.tokenMaps[3], queryReps.concepts, 12);
+    this._collectTermCandidates(ids, this.tokenMaps[4], queryReps.focusTokens, 12);
     if (ids.size === 0) {
       for (const id of this.entries.keys()) {
         ids.add(id);

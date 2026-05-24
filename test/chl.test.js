@@ -7,6 +7,7 @@ const { Readable } = require("node:stream");
 const { EventEmitter } = require("node:events");
 const {
   CHL,
+  JSCHL,
   hammingDistance,
   hammingSimilarity,
   semanticHashFromText,
@@ -75,6 +76,255 @@ test("memory recall returns the nearest payload", () => {
   const result = chl.infer("El gato duerme en la mesa");
   assert.equal(result.answer.fact, "cat-on-table");
   assert.ok(result.confidence > 0.3);
+});
+
+test("concept graph extracts entities and relations from stored memories", () => {
+  const chl = new CHL({ bitCount: 128, hyperDim: 256, maxEntries: 100 });
+
+  chl.remember("El gato duerme sobre la mesa", { fact: "cat-on-table" }, { quality: 8 });
+  chl.remember("La llave abre la puerta", { fact: "key-door" }, { quality: 7 });
+
+  const graph = chl.conceptGraph();
+  const entityLabels = graph.nodes.filter((node) => node.type === "entity").map((node) => node.label);
+  const relationLabels = graph.edges.filter((edge) => edge.type === "relation").map((edge) => edge.label);
+
+  assert.ok(entityLabels.includes("el gato"));
+  assert.ok(entityLabels.includes("la mesa"));
+  assert.ok(relationLabels.includes("duerme_sobre"));
+  assert.ok(relationLabels.includes("abre"));
+  assert.ok(graph.stats.nodeCount >= 4);
+  assert.ok(graph.stats.edgeCount >= 2);
+});
+
+test("thought engine builds a structured hypothesis trace", () => {
+  const chl = new CHL({ bitCount: 128, hyperDim: 256, maxEntries: 100 });
+
+  chl.remember("El gato duerme sobre la mesa", { fact: "cat-on-table" }, { quality: 8 });
+  chl.remember("La llave abre la puerta", { fact: "key-door" }, { quality: 7 });
+
+  const thought = chl.think("El gato duerme en la mesa", { topK: 3 });
+
+  assert.ok(Array.isArray(thought.hypotheses));
+  assert.ok(thought.hypotheses.length > 0);
+  assert.ok(thought.best);
+  assert.ok(thought.confidence >= 0);
+  assert.ok(thought.best.evidence.concepts.length > 0 || thought.best.evidence.focusTokens.length > 0);
+});
+
+test("plan and verify close the reasoning loop", () => {
+  const chl = new CHL({ bitCount: 128, hyperDim: 256, maxEntries: 100 });
+
+  chl.remember("El gato duerme sobre la mesa", { fact: "cat-on-table" }, { quality: 8 });
+  chl.remember("La llave abre la puerta", { fact: "key-door" }, { quality: 7 });
+
+  const plan = chl.plan("El gato duerme en la mesa", { topK: 3 });
+  const verification = chl.verify(plan, { topK: 3 });
+
+  assert.ok(Array.isArray(plan.steps));
+  assert.ok(plan.steps.length >= 2);
+  assert.ok(plan.confidence >= 0);
+  assert.ok(Array.isArray(verification.checks));
+  assert.ok(verification.checks.length === plan.steps.length);
+  assert.ok(typeof verification.verified === "boolean");
+  assert.ok(verification.confidence >= 0);
+});
+
+test("ask chooses between answer clarify and plan", () => {
+  const chl = new JSCHL({ bitCount: 128, hyperDim: 256, maxEntries: 100 });
+
+  chl.remember("El gato duerme sobre la mesa", { fact: "cat-on-table" }, { quality: 8 });
+
+  const answer = chl.ask("El gato duerme en la mesa", { topK: 3 });
+  const clarify = chl.ask("Como deberia proceder con este tema?", { topK: 3 });
+
+  assert.ok(["answer", "plan", "clarify"].includes(answer.kind));
+  assert.ok(answer.confidence >= 0);
+  assert.ok(typeof answer.responseText === "string" && answer.responseText.length > 0);
+  assert.ok(typeof answer.explanation === "string" && answer.explanation.length > 0);
+  assert.ok(Array.isArray(answer.claims));
+  assert.ok(answer.generation && typeof answer.generation === "object");
+  assert.equal(chl.decisionEpisodes().length, 2);
+  assert.equal(clarify.kind, "clarify");
+});
+
+test("learning from verification updates the semantic bias", () => {
+  const chl = new JSCHL({ bitCount: 128, hyperDim: 256, maxEntries: 100 });
+
+  chl.remember("Memoria semantica compacta", { id: "one" });
+  const before = Array.from(chl.memory.bitBias);
+
+  const verification = {
+    verified: true,
+    confidence: 0.9,
+    plan: { query: "Memoria semantica compacta" },
+    thought: {
+      best: {
+        evidence: {
+          text: "Memoria semantica compacta",
+        },
+      },
+    },
+  };
+
+  const result = chl.learnFromVerification(verification);
+  const after = Array.from(chl.memory.bitBias);
+
+  assert.ok(result.ok);
+  assert.ok(result.reward > 0);
+  assert.ok(after.some((value, index) => value !== before[index]));
+});
+
+test("decision episodes are exposed over HTTP", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chl-episodes-"));
+  const persistPath = path.join(dir, "memory.log");
+  const server = createServer({ memory: { persistPath, bitCount: 128, hyperDim: 256 } });
+
+  await invokeServer(server, {
+    method: "POST",
+    url: "/remember",
+    body: JSON.stringify({
+      text: "El gato duerme sobre la mesa",
+      payload: { fact: "cat" },
+      metadata: { quality: 8 },
+    }),
+  });
+
+  await invokeServer(server, {
+    method: "POST",
+    url: "/ask",
+    body: JSON.stringify({ query: "El gato duerme en la mesa", topK: 3 }),
+  });
+
+  const episodesResponse = await invokeServer(server, {
+    method: "GET",
+    url: "/episodes",
+  });
+
+  const episodes = JSON.parse(episodesResponse.body);
+  assert.ok(Array.isArray(episodes));
+  assert.equal(episodes.length, 1);
+  assert.ok(["answer", "plan", "clarify"].includes(episodes[0].kind));
+  assert.ok(typeof episodes[0].responseText === "string");
+});
+
+test("episodes consolidate into semantic rules over HTTP", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chl-consolidate-"));
+  const persistPath = path.join(dir, "memory.log");
+  const server = createServer({ memory: { persistPath, bitCount: 128, hyperDim: 256 } });
+
+  await invokeServer(server, {
+    method: "POST",
+    url: "/remember",
+    body: JSON.stringify({
+      text: "El gato duerme sobre la mesa",
+      payload: { fact: "cat-on-table" },
+      metadata: { quality: 8 },
+    }),
+  });
+
+  await invokeServer(server, {
+    method: "POST",
+    url: "/ask",
+    body: JSON.stringify({ query: "El gato duerme en la mesa", topK: 3 }),
+  });
+
+  await invokeServer(server, {
+    method: "POST",
+    url: "/ask",
+    body: JSON.stringify({ query: "El gato duerme en la mesa", topK: 3 }),
+  });
+
+  const consolidateResponse = await invokeServer(server, {
+    method: "POST",
+    url: "/consolidate",
+    body: JSON.stringify({ minSupport: 2 }),
+  });
+  const stateResponse = await invokeServer(server, {
+    method: "GET",
+    url: "/state",
+  });
+
+  const consolidation = JSON.parse(consolidateResponse.body);
+  const state = JSON.parse(stateResponse.body);
+
+  assert.ok(consolidation.ok);
+  assert.ok(consolidation.ruleCount >= 1);
+  assert.equal(consolidation.nextEpisodeIndex, 2);
+  assert.equal(state.consolidation.lastEpisodeIndex, 2);
+  assert.equal(state.entries.length, 2);
+  assert.ok(state.entries.some((entry) => String(entry.payloadJson).includes("episode_rule")));
+});
+
+test("automatic consolidation runs in the background after N episodes", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chl-auto-consolidate-"));
+  const persistPath = path.join(dir, "memory.log");
+  const server = createServer({
+    memory: {
+      persistPath,
+      bitCount: 128,
+      hyperDim: 256,
+      autoConsolidationEvery: 2,
+      autoConsolidationMinConfidence: 0,
+      autoConsolidationMinSupport: 2,
+    },
+  });
+
+  await invokeServer(server, {
+    method: "POST",
+    url: "/remember",
+    body: JSON.stringify({
+      text: "El gato duerme sobre la mesa",
+      payload: { fact: "cat-on-table" },
+      metadata: { quality: 8 },
+    }),
+  });
+
+  await invokeServer(server, {
+    method: "POST",
+    url: "/ask",
+    body: JSON.stringify({ query: "El gato duerme en la mesa", topK: 3 }),
+  });
+
+  await invokeServer(server, {
+    method: "POST",
+    url: "/ask",
+    body: JSON.stringify({ query: "El gato duerme en la mesa", topK: 3 }),
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  const stateResponse = await invokeServer(server, {
+    method: "GET",
+    url: "/state",
+  });
+  const state = JSON.parse(stateResponse.body);
+
+  assert.equal(state.consolidation.lastEpisodeIndex, 2);
+  assert.ok(state.consolidation.auto.completed >= 1);
+  assert.ok(state.entries.some((entry) => String(entry.payloadJson).includes("episode_rule")));
+});
+
+test("high confidence threshold suppresses auto consolidation", async () => {
+  const chl = new JSCHL({
+    bitCount: 128,
+    hyperDim: 256,
+    autoConsolidationEvery: 1,
+    autoConsolidationMinConfidence: 1,
+    autoConsolidationMinSupport: 2,
+  });
+
+  chl.remember("El gato duerme sobre la mesa", { fact: "cat-on-table" }, { quality: 8 });
+  chl.ask("El gato duerme en la mesa", { topK: 3 });
+  chl.ask("El gato duerme en la mesa", { topK: 3 });
+
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  const state = chl.consolidationState();
+  const entries = chl.memory.entries.values ? Array.from(chl.memory.entries.values()) : [];
+
+  assert.equal(state.lastEpisodeIndex, 0);
+  assert.ok(state.auto.skipped >= 1);
+  assert.ok(!entries.some((entry) => String(entry.text).includes("Patron consolidado")));
 });
 
 test("feedback updates the semantic bias without breaking recall", () => {
@@ -423,6 +673,60 @@ test("MCP exposes the learned lexicon for inspection and export", async () => {
   assert.equal(exportPayload.format, "chl-lexicon-tsv-v1");
   assert.ok(exportPayload.export.conceptsTsv.includes("felino\tgato"));
   assert.ok(resource.result.contents[0].text.includes("# phrases"));
+});
+
+test("MCP exposes episode consolidation", async () => {
+  const context = createMcpContext({
+    memory: { bitCount: 128, hyperDim: 256 },
+  });
+
+  await handleMcpMessage(context, { jsonrpc: "2.0", id: 30, method: "initialize", params: {} });
+  await handleMcpMessage(context, {
+    jsonrpc: "2.0",
+    id: 31,
+    method: "tools/call",
+    params: {
+      name: "chl_remember",
+      arguments: {
+        input: "El gato duerme sobre la mesa",
+        payload: { fact: "cat-on-table" },
+        metadata: { quality: 8 },
+      },
+    },
+  });
+  await handleMcpMessage(context, {
+    jsonrpc: "2.0",
+    id: 32,
+    method: "tools/call",
+    params: { name: "chl_ask", arguments: { query: "El gato duerme en la mesa", topK: 3 } },
+  });
+  await handleMcpMessage(context, {
+    jsonrpc: "2.0",
+    id: 33,
+    method: "tools/call",
+    params: { name: "chl_ask", arguments: { query: "El gato duerme en la mesa", topK: 3 } },
+  });
+
+  const consolidate = await handleMcpMessage(context, {
+    jsonrpc: "2.0",
+    id: 34,
+    method: "tools/call",
+    params: { name: "chl_consolidate", arguments: { minSupport: 2 } },
+  });
+  const consolidationResource = await handleMcpMessage(context, {
+    jsonrpc: "2.0",
+    id: 35,
+    method: "resources/read",
+    params: { uri: "chl://consolidation" },
+  });
+
+  const consolidatePayload = JSON.parse(consolidate.result.content[0].text);
+  const resourcePayload = JSON.parse(consolidationResource.result.contents[0].text);
+
+  assert.ok(consolidatePayload.ok);
+  assert.ok(consolidatePayload.ruleCount >= 1);
+  assert.equal(resourcePayload.consolidation.lastEpisodeIndex, 2);
+  assert.equal(resourcePayload.episodes.length, 2);
 });
 
 test("MCP exposes the active memory profile", async () => {

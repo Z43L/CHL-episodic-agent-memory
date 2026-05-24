@@ -78,6 +78,84 @@ function toolDefinitions() {
       },
     },
     {
+      name: "chl_think",
+      description: "Build a structured thought trace from memory, graph and hypotheses.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: {},
+          topK: { type: "number", minimum: 1 },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "chl_ask",
+      description: "Choose between answering, clarifying or planning from the current memory state.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: {},
+          topK: { type: "number", minimum: 1 },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "chl_plan",
+      description: "Build a structured plan from the current thought trace.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: {},
+          topK: { type: "number", minimum: 1 },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "chl_verify",
+      description: "Verify a plan or query against memory and the concept graph.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          plan: {},
+          query: {},
+          topK: { type: "number", minimum: 1 },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "chl_learn_from_verification",
+      description: "Update memory feedback using a verification result.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          verification: {},
+          plan: {},
+          query: {},
+          extraSignals: { type: "array" },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "chl_consolidate",
+      description: "Consolidate repeated decision episodes into semantic rules.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          startIndex: { type: "number", minimum: 0 },
+          minSupport: { type: "number", minimum: 1 },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
       name: "chl_learn",
       description: "Apply feedback to a memory or query string.",
       inputSchema: {
@@ -161,6 +239,15 @@ function toolDefinitions() {
       },
     },
     {
+      name: "chl_graph",
+      description: "Inspect the derived concept graph from stored memories.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
       name: "chl_entries",
       description: "Inspect every stored entry in full detail.",
       inputSchema: {
@@ -172,6 +259,15 @@ function toolDefinitions() {
     {
       name: "chl_journal",
       description: "Inspect the journal of mutations that drives persistence and restore.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "chl_episodes",
+      description: "Inspect the stored decision episodes.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -234,6 +330,24 @@ async function callTool(context, name, args = {}) {
       return { content: jsonContent(context.memory.recall(args.query, { topK: args.topK ?? 5 })) };
     case "chl_infer":
       return { content: jsonContent(context.memory.infer(args.query, { topK: args.topK ?? 5 })) };
+    case "chl_think":
+      return { content: jsonContent(context.memory.think(args.query, { topK: args.topK ?? 5 })) };
+    case "chl_ask":
+      return { content: jsonContent(context.memory.ask(args.query, { topK: args.topK ?? 5 })) };
+    case "chl_plan":
+      return { content: jsonContent(context.memory.plan(args.query, { topK: args.topK ?? 5 })) };
+    case "chl_verify":
+      return { content: jsonContent(context.memory.verify(args.plan ?? args.query ?? "", { topK: args.topK ?? 5 })) };
+    case "chl_learn_from_verification":
+      return {
+        content: jsonContent(
+          context.memory.learnFromVerification(args.verification ?? args.plan ?? args.query ?? {}, {
+            extraSignals: args.extraSignals ?? [],
+          })
+        ),
+      };
+    case "chl_consolidate":
+      return { content: jsonContent(context.memory.consolidateEpisodes(args)) };
     case "chl_learn":
       context.memory.learn(args.input, args.reward ?? 0);
       return { content: jsonContent({ ok: true }) };
@@ -264,10 +378,14 @@ async function callTool(context, name, args = {}) {
       return { content: jsonContent({ profile: context.memory.profile() }) };
     case "chl_state":
       return { content: jsonContent(context.memory.dumpState()) };
+    case "chl_graph":
+      return { content: jsonContent(context.memory.conceptGraph()) };
     case "chl_entries":
       return { content: jsonContent(context.memory.entries()) };
     case "chl_journal":
       return { content: jsonContent(context.memory.journal()) };
+    case "chl_episodes":
+      return { content: jsonContent(context.memory.episodes()) };
     case "chl_bucket_stats":
       return { content: jsonContent(context.memory.bucketStats()) };
     case "chl_clear":
@@ -304,6 +422,24 @@ function listResources(context) {
         description: "Current state including snapshot, bucket stats, entries and journal.",
       },
       {
+        uri: "chl://graph",
+        mimeType: "application/json",
+        name: "CHL Graph",
+        description: "Derived concept graph from stored memories.",
+      },
+      {
+        uri: "chl://thought",
+        mimeType: "application/json",
+        name: "CHL Thought",
+        description: "Structured thought trace built from memory and graph.",
+      },
+      {
+        uri: "chl://plan",
+        mimeType: "application/json",
+        name: "CHL Plan",
+        description: "Structured plan derived from the current thought trace.",
+      },
+      {
         uri: "chl://entries",
         mimeType: "application/json",
         name: "CHL Entries",
@@ -314,6 +450,18 @@ function listResources(context) {
         mimeType: "application/json",
         name: "CHL Journal",
         description: "Mutation journal used for persistence.",
+      },
+      {
+        uri: "chl://episodes",
+        mimeType: "application/json",
+        name: "CHL Episodes",
+        description: "Decision episodes generated by ask/plan/verify flows.",
+      },
+      {
+        uri: "chl://consolidation",
+        mimeType: "application/json",
+        name: "CHL Consolidation",
+        description: "Consolidation cursor and episode summary for semantic rule extraction.",
       },
       {
         uri: "chl://backup.memory",
@@ -358,10 +506,69 @@ async function readResource(context, uri) {
       return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify({ profile: context.memory.profile() }, null, 2) }] };
     case "chl://state":
       return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.dumpState(), null, 2) }] };
+    case "chl://graph":
+      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.conceptGraph(), null, 2) }] };
+    case "chl://thought":
+      return {
+        contents: [
+          {
+            uri,
+            mimeType: "application/json",
+            text: JSON.stringify(
+              {
+                hint: "Use chl_think with a query to generate a full thought trace.",
+                latestQuery: context.memory.entries().at(-1)?.text ?? null,
+                latestTrace: context.memory.entries().length > 0 ? context.memory.think(context.memory.entries().at(-1).text, { topK: 5 }) : null,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    case "chl://plan":
+      return {
+        contents: [
+          {
+            uri,
+            mimeType: "application/json",
+            text: JSON.stringify(
+              {
+                hint: "Use chl_plan with a query to generate a plan, then chl_verify to validate it.",
+                latestPlan:
+                  context.memory.entries().length > 0
+                    ? context.memory.plan(context.memory.entries().at(-1).text, { topK: 5 })
+                    : null,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
     case "chl://entries":
       return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.entries(), null, 2) }] };
     case "chl://journal":
       return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.journal(), null, 2) }] };
+    case "chl://episodes":
+      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(context.memory.episodes(), null, 2) }] };
+    case "chl://consolidation":
+      return {
+        contents: [
+          {
+            uri,
+            mimeType: "application/json",
+            text: JSON.stringify(
+              {
+                consolidation: context.memory.consolidationState(),
+                episodes: context.memory.episodes(),
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
     case "chl://backup.memory":
       return {
         contents: [

@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const readline = require("node:readline");
 const path = require("node:path");
+const { analyzeText } = require("./analysis");
 const { charNgrams, normalizeText, tokenize } = require("./utils");
 const {
   decodeMemoryArchive,
@@ -9,7 +10,27 @@ const {
   writeMemoryArchive,
 } = require("./backup");
 const { loadLexiconState, saveLexiconState } = require("./concepts");
+const { buildConceptGraph } = require("./graph");
+const {
+  buildAnswer,
+  buildDecisionEpisode,
+  buildHypotheses,
+  buildPlan,
+  explainThought,
+  learnFromVerification,
+  verifyPlan,
+} = require("./thought");
+const { buildConsolidation } = require("./consolidation");
 const { resolveMemoryProfile } = require("./profiles");
+const { clamp } = require("./utils");
+
+function scheduleTask(fn) {
+  if (typeof setImmediate === "function") {
+    setImmediate(fn);
+  } else {
+    setTimeout(fn, 0);
+  }
+}
 
 function loadBinding() {
   const candidates = [
@@ -47,6 +68,20 @@ class NativeCHL {
     this._readyError = null;
     this._nativeLoadError = bindingState.error ?? null;
     this.fallback = null;
+    this._decisionEpisodes = [];
+    this._lastConsolidatedEpisodeIndex = 0;
+    this.autoConsolidationEvery = Math.max(0, Math.floor(Number(this.options.autoConsolidationEvery ?? 0) || 0));
+    this.autoConsolidationMinConfidence = clamp(Number(this.options.autoConsolidationMinConfidence ?? 0.65) || 0, 0, 1);
+    this.autoConsolidationMinSupport = Math.max(1, Math.floor(Number(this.options.autoConsolidationMinSupport ?? 2) || 2));
+    this._autoConsolidationPending = false;
+    this._autoConsolidationStats = {
+      scheduled: 0,
+      completed: 0,
+      skipped: 0,
+      lastRunAt: null,
+      lastError: null,
+      lastReason: null,
+    };
     this._syncLexiconEnv();
     if (binding) {
       this.engine = new binding.CHLEngine(
@@ -129,6 +164,10 @@ class NativeCHL {
             this.remember(event.text, event.payload, event.metadata);
           } else if (event.type === "learn") {
             this.learn(event.text, event.reward);
+          } else if (event.type === "episode" && event.episode) {
+            this._decisionEpisodes.push(event.episode);
+          } else if (event.type === "consolidation" && Number.isFinite(event.nextEpisodeIndex)) {
+            this._lastConsolidatedEpisodeIndex = Math.max(this._lastConsolidatedEpisodeIndex, event.nextEpisodeIndex);
           }
         }
       } finally {
@@ -150,6 +189,12 @@ class NativeCHL {
 
   _appendEvent(event) {
     this._journal.push(event);
+    if (event?.type === "episode" && event.episode) {
+      this._decisionEpisodes.push(event.episode);
+    }
+    if (event?.type === "consolidation" && Number.isFinite(event.nextEpisodeIndex)) {
+      this._lastConsolidatedEpisodeIndex = Math.max(this._lastConsolidatedEpisodeIndex, event.nextEpisodeIndex);
+    }
     if (!this.persistPath || this._hydrating) return;
     fs.appendFileSync(this.persistPath, `${JSON.stringify(event)}\n`);
   }
@@ -241,6 +286,10 @@ class NativeCHL {
 
   updateFeedback(input, reward = 0) {
     return this.learn(input, reward);
+  }
+
+  analyze(input) {
+    return analyzeText(input);
   }
 
   snapshot() {
@@ -336,6 +385,8 @@ class NativeCHL {
         bucketStats: this.bucketStats(),
         entries: this.entries(),
         journal: [...this._journal],
+        episodes: [...this._decisionEpisodes],
+        consolidation: this.consolidationState(),
       };
     }
     if (typeof this.engine.dumpState === "function") {
@@ -343,6 +394,8 @@ class NativeCHL {
       return {
         ...state,
         journal: [...this._journal],
+        episodes: [...this._decisionEpisodes],
+        consolidation: this.consolidationState(),
       };
     }
     return {
@@ -350,11 +403,23 @@ class NativeCHL {
       bucketStats: this.bucketStats(),
       entries: this.entries(),
       journal: [...this._journal],
+      episodes: [...this._decisionEpisodes],
+      consolidation: this.consolidationState(),
     };
   }
 
   journal() {
     return [...this._journal];
+  }
+
+  episodes() {
+    return [...this._decisionEpisodes];
+  }
+
+  _episodesFromJournal(journal = []) {
+    return journal
+      .filter((event) => event && event.type === "episode" && event.episode)
+      .map((event) => event.episode);
   }
 
   confidenceFor(query, options = {}) {
@@ -375,6 +440,123 @@ class NativeCHL {
       },
       supportStrength: this.confidenceFor(query, { topK: support.length || 5 }),
     };
+  }
+
+  conceptGraph() {
+    return buildConceptGraph(this.entries());
+  }
+
+  think(query, options = {}) {
+    return buildHypotheses(query, this, options);
+  }
+
+  plan(query, options = {}) {
+    return buildPlan(query, this, options);
+  }
+
+  verify(planOrQuery, options = {}) {
+    return verifyPlan(planOrQuery, this, options);
+  }
+
+  ask(query, options = {}) {
+    const decision = buildAnswer(query, this, options);
+    const episode = this.recordDecisionEpisode(decision);
+    return {
+      ...decision,
+      episodeId: episode.id,
+    };
+  }
+
+  learnFromVerification(verification, options = {}) {
+    return learnFromVerification(this, verification, options);
+  }
+
+  consolidateEpisodes(options = {}) {
+    const startIndex = options.startIndex ?? this._lastConsolidatedEpisodeIndex ?? 0;
+    const minConfidence = options.minConfidence ?? null;
+    const episodes = this._decisionEpisodes
+      .slice(startIndex)
+      .filter((episode) => minConfidence == null || Number(episode?.confidence ?? 0) >= minConfidence);
+    const consolidation = buildConsolidation(episodes, options);
+    for (const rule of consolidation.rules) {
+      this.remember(rule.text, rule.payload, rule.metadata);
+    }
+    this._appendEvent({
+      type: "consolidation",
+      startIndex,
+      nextEpisodeIndex: this._decisionEpisodes.length,
+      summary: consolidation.summary,
+      ruleCount: consolidation.rules.length,
+      conceptPairCount: consolidation.conceptPairs.length,
+      phrasePairCount: consolidation.phrasePairs.length,
+    });
+    this._lastConsolidatedEpisodeIndex = this._decisionEpisodes.length;
+    return {
+      ok: true,
+      ...consolidation.summary,
+      rules: consolidation.rules,
+      conceptPairs: consolidation.conceptPairs,
+      phrasePairs: consolidation.phrasePairs,
+      nextEpisodeIndex: this._lastConsolidatedEpisodeIndex,
+    };
+  }
+
+  consolidationState() {
+    return {
+      lastEpisodeIndex: this._lastConsolidatedEpisodeIndex ?? 0,
+      episodeCount: this._decisionEpisodes.length,
+      auto: this.autoConsolidationState(),
+    };
+  }
+
+  autoConsolidationState() {
+    return {
+      every: this.autoConsolidationEvery,
+      minConfidence: this.autoConsolidationMinConfidence,
+      minSupport: this.autoConsolidationMinSupport,
+      pending: this._autoConsolidationPending,
+      ...this._autoConsolidationStats,
+    };
+  }
+
+  _maybeScheduleAutoConsolidation(episode) {
+    if (this.autoConsolidationEvery <= 0) return;
+    if (!episode || Number(episode.confidence ?? 0) < this.autoConsolidationMinConfidence) {
+      this._autoConsolidationStats.skipped += 1;
+      this._autoConsolidationStats.lastReason = "confidence_below_threshold";
+      return;
+    }
+    const pendingEpisodes = this._decisionEpisodes.length - (this._lastConsolidatedEpisodeIndex ?? 0);
+    if (pendingEpisodes < this.autoConsolidationEvery) return;
+    if (this._autoConsolidationPending) return;
+
+    this._autoConsolidationPending = true;
+    this._autoConsolidationStats.scheduled += 1;
+    this._autoConsolidationStats.lastReason = "episode_threshold_reached";
+    scheduleTask(() => {
+      try {
+        this.consolidateEpisodes({
+          minSupport: this.autoConsolidationMinSupport,
+        });
+        this._autoConsolidationStats.completed += 1;
+        this._autoConsolidationStats.lastRunAt = new Date().toISOString();
+      } catch (error) {
+        this._autoConsolidationStats.lastError = error.message;
+      } finally {
+        this._autoConsolidationPending = false;
+      }
+    });
+  }
+
+  recordDecisionEpisode(decision, extras = {}) {
+    const episode = buildDecisionEpisode(decision, extras);
+    this._appendEvent({ type: "episode", episode });
+    this._maybeScheduleAutoConsolidation(episode);
+    return episode;
+  }
+
+  explainThought(query, options = {}) {
+    return explainThought(this.think(query, options));
   }
 
   route(query, relationKey, options = {}) {
@@ -402,11 +584,33 @@ class NativeCHL {
     if (this.fallback) {
       this.fallback.memory.entries.clear();
       this._journal = [];
+      this._decisionEpisodes = [];
+      this._lastConsolidatedEpisodeIndex = 0;
+      this._autoConsolidationPending = false;
+      this._autoConsolidationStats = {
+        scheduled: 0,
+        completed: 0,
+        skipped: 0,
+        lastRunAt: null,
+        lastError: null,
+        lastReason: null,
+      };
       if (this.persistPath) fs.writeFileSync(this.persistPath, "");
       return;
     }
     this.engine.clear();
     this._journal = [];
+    this._decisionEpisodes = [];
+    this._lastConsolidatedEpisodeIndex = 0;
+    this._autoConsolidationPending = false;
+    this._autoConsolidationStats = {
+      scheduled: 0,
+      completed: 0,
+      skipped: 0,
+      lastRunAt: null,
+      lastError: null,
+      lastReason: null,
+    };
     if (this.persistPath) fs.writeFileSync(this.persistPath, "");
   }
 
@@ -451,6 +655,20 @@ class NativeCHL {
     }
 
     this._journal = [...backup.journal];
+    this._decisionEpisodes = Array.isArray(backup.episodes) ? [...backup.episodes] : this._episodesFromJournal(backup.journal);
+    const backupConsolidation = backup.consolidation ?? backup.state?.consolidation ?? null;
+    this._lastConsolidatedEpisodeIndex = Number.isFinite(backupConsolidation?.lastEpisodeIndex)
+      ? backupConsolidation.lastEpisodeIndex
+      : this._decisionEpisodes.length;
+    this._autoConsolidationPending = false;
+    this._autoConsolidationStats = {
+      scheduled: 0,
+      completed: 0,
+      skipped: 0,
+      lastRunAt: null,
+      lastError: null,
+      lastReason: null,
+    };
     this._replacePersistFile(this._journal);
     if (backup.lexicon) {
       this._saveLexiconState(backup.lexicon);
@@ -514,17 +732,47 @@ function safeParse(value) {
 
 function unwrapCandidatePayload(candidate) {
   if (!candidate || typeof candidate !== "object") return null;
-  if (candidate.payload !== undefined) {
-    return candidate.payload;
+  const candidatePayload = candidate.payload !== undefined ? candidate.payload : undefined;
+  if (candidatePayload !== undefined) {
+    if (
+      candidatePayload &&
+      typeof candidatePayload === "object" &&
+      Object.prototype.hasOwnProperty.call(candidatePayload, "payload") &&
+      (Object.prototype.hasOwnProperty.call(candidatePayload, "metadata") ||
+        Object.prototype.hasOwnProperty.call(candidatePayload, "sourceText"))
+    ) {
+      return candidatePayload.payload;
+    }
+    return candidatePayload;
   }
   if (candidate.payloadJson !== undefined) {
-    return safeParse(candidate.payloadJson);
+    const parsed = safeParse(candidate.payloadJson);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      Object.prototype.hasOwnProperty.call(parsed, "payload") &&
+      (Object.prototype.hasOwnProperty.call(parsed, "metadata") ||
+        Object.prototype.hasOwnProperty.call(parsed, "sourceText"))
+    ) {
+      return parsed.payload;
+    }
+    return parsed;
   }
   if (candidate.entry && candidate.entry.payload !== undefined) {
     return candidate.entry.payload;
   }
   if (candidate.entry && candidate.entry.payloadJson !== undefined) {
-    return safeParse(candidate.entry.payloadJson);
+    const parsed = safeParse(candidate.entry.payloadJson);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      Object.prototype.hasOwnProperty.call(parsed, "payload") &&
+      (Object.prototype.hasOwnProperty.call(parsed, "metadata") ||
+        Object.prototype.hasOwnProperty.call(parsed, "sourceText"))
+    ) {
+      return parsed.payload;
+    }
+    return parsed;
   }
   return null;
 }

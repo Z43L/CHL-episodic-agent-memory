@@ -1,238 +1,132 @@
-# CHL Extension
+# CHL Memory Bridge
 
-CHL Extension is a local memory system built around the CHL engine. It gives an AI agent a persistent place to store facts, preferences, task context, and learned associations, then retrieve that information later through recall and inference.
+CHL es un motor de memoria episódica para agentes de IA con dos piezas:
 
-The project is useful when you want the model to remember important context across turns or sessions without manually re-pasting everything every time. Instead of relying only on the chat window, CHL keeps structured memory that can be queried, reinforced, backed up, and restored.
+1. **Motor CHL (C++ nativo)** — almacenamiento y recuperación vectorial en microsegundos
+2. **Memory Bridge** — conecta la memoria CHL con modelos grandes (GPT-5, Claude, Ollama, etc.)
 
-## What It Is For
+El resultado es un sistema **RAG episódico**: el agente recupera contexto de su memoria persistente a velocidad de C++ y luego razona sobre él con la inteligencia de un modelo grande.
 
-- remembering user preferences, decisions, and recurring project context
-- recalling related memories when the model needs supporting information
-- inferring the best answer from stored context instead of returning a raw list
-- exporting and restoring memory state for portability and recovery
-- inspecting learned lexicon data for debugging and reuse
+## Por qué existe
 
-## Why It Helps
+Los agentes de IA pierden el contexto entre sesiones. CHL resuelve esto dándoles una memoria persistente, consultable y auto-mejorable que funciona a través de MCP — lo que significa que **todos tus agentes (Codex, Claude Code, OpenCode, OpenClaw, Hermes) comparten la misma memoria**.
 
-- reduces repeated explanation and context loss
-- makes recurring workflows faster and more consistent
-- keeps important memory outside a single conversation
-- provides backup and restore paths for safety
-- exposes both an HTTP API and MCP tools, so it fits interactive and agent-driven workflows
+## Arquitectura
 
-## Example Workflow
+```
+Query → CHL Engine (C++, μs) → MemoryContext → LLM (GPT-5/Claude/Ollama)
+         ↑_____________________ tool calls ___________________↓
+```
 
-1. Save an important fact, preference, or decision with `remember`.
-2. Retrieve related context later with `recall`.
-3. Use `infer` when you want the system to synthesize the best answer from memory.
-4. Reinforce or correct behavior with `learn`.
-5. Export a backup before major changes.
-6. Restore the backup if you need to recover a previous state.
+| Capa | Qué hace | Dónde |
+|------|---------|-------|
+| Motor de memoria | Almacenamiento/recuperación vectorial | `native/chl_addon.cc` (C++) |
+| Semantic navigation | Búsqueda multi-hop + variantes | `src/neural/chl-semantic-expert.js` |
+| Memory context | Formateo de memorias para LLM | `src/bridge/memory-context.js` |
+| Model adapter | Abstracción de proveedores LLM | `src/bridge/model-adapter.js` |
+| Session | Historial multi-turno + tool loop | `src/bridge/session.js` |
+| Bridge | Orchestrador principal | `src/bridge/bridge.js` |
 
-## What It Includes
+## Proveedores soportados
 
-- A native CHL-backed memory engine
-- A local HTTP server for memory operations
-- An MCP server for tool-based integrations
-- Backup and restore utilities
-- Lexicon inspection and TSV export
+- **OpenAI** — GPT-4, GPT-5, o3, o4-mini
+- **Anthropic** — Claude Opus, Sonnet, Haiku
+- **Ollama** — Modelos locales (llama3, mistral, qwen, etc.)
+- **OpenRouter** — Proxy unificado a cientos de modelos
+- **OpenAI-compatible** — vLLM, LiteLLM, LocalAI, etc.
 
-## Project Layout
+## Uso rápido
 
-- `src/` - core implementation
-- `bin/` - CLI entrypoints
-- `native/` - native addon source
-- `scripts/` - build and evaluation scripts
-- `test/` - automated tests
-- `artifacts/` - benchmark and evaluation outputs
+### Modo MCP (recomendado para agentes)
 
-## Requirements
+Registra en `~/.codex/config.toml` (o equivalente en Claude Code, OpenCode, etc.):
 
-- Node.js compatible with the current project setup
-- A working native build toolchain for compiling the addon
+```toml
+[mcp_servers.chl-memory]
+command = "node"
+args = ["/ruta/a/CHL/src/mcp-server.js"]
+startup_timeout_sec = 90
 
-## Install
+[mcp_servers.chl-memory.env]
+CHL_PERSIST_PATH = "/ruta/a/CHL/chl-memory-data/chl-memory.log"
+```
+
+El agente tendrá acceso a todas las herramientas CHL: `chl_remember`, `chl_recall`, `chl_infer`, `chl_think`, `chl_plan`, `chl_learn`, etc.
+
+### Modo Bridge (chat directo con modelo grande)
+
+```bash
+# Con OpenAI
+npm run bridge:openai
+
+# Con Anthropic
+ANTHROPIC_API_KEY=sk-ant-... npm run bridge:anthropic
+
+# Con Ollama (local)
+npm run bridge:ollama
+```
+
+### Modo programático
+
+```js
+const { createBridge } = require('chl-extension');
+
+const bridge = createBridge({
+  provider: 'openai',
+  apiKey: process.env.OPENAI_API_KEY,
+  model: 'gpt-4o',
+  persistPath: './mi-memoria.log',
+});
+
+const result = await bridge.turn('¿Qué decidimos sobre la arquitectura del proyecto?');
+console.log(result.response);
+// → "Según la memoria, decidiste usar microservicios con Redis como message broker..."
+```
+
+## Herramientas MCP
+
+| Herramienta | Descripción |
+|------------|-------------|
+| `chl_remember` | Guarda un hecho, preferencia o contexto |
+| `chl_recall` | Recupera memorias por similitud semántica |
+| `chl_infer` | Sintetiza la mejor respuesta desde memoria |
+| `chl_think` | Traza de pensamiento estructurada con evidencias |
+| `chl_plan` | Plan paso a paso basado en memoria |
+| `chl_verify` | Verifica un plan contra la memoria |
+| `chl_learn` | Refuerza o suprime asociaciones |
+| `chl_consolidate` | Consolida episodios en reglas |
+| `chl_snapshot` | Vista compacta del estado actual |
+| `chl_backup_memory` | Exporta la memoria completa |
+| `chl_restore_memory` | Restaura desde backup |
+
+## Instalación
 
 ```bash
 npm install
-```
-
-If you need to rebuild the native addon:
-
-```bash
 npm run build:native
 ```
 
-## Run the HTTP Server
+Requiere Node.js ≥ 24 y `clang++` para compilar el addon nativo.
 
-Start the local API server:
+## Estructura del proyecto
 
-```bash
-npm run serve
 ```
-
-By default the server listens on `http://127.0.0.1:3030`.
-
-### HTTP Endpoints
-
-- `GET /health`
-- `GET /snapshot`
-- `GET /profile`
-- `GET /state`
-- `GET /entries`
-- `GET /journal`
-- `GET /lexicon`
-- `GET /lexicon.concepts.tsv`
-- `GET /lexicon.phrases.tsv`
-- `GET /lexicon.tsv`
-- `GET /backup.memory`
-- `POST /remember`
-- `POST /recall`
-- `POST /infer`
-- `POST /learn`
-- `POST /restore.memory`
-
-### Example HTTP Usage
-
-Store a memory:
-
-```bash
-curl -X POST http://127.0.0.1:3030/remember \
-  -H "content-type: application/json" \
-  -d '{
-    "text": "El usuario prefiere respuestas en español",
-    "metadata": {
-      "source": "conversation",
-      "topic": "language preference"
-    }
-  }'
+src/
+├── native.js          # Binding C++ (NativeCHL)
+├── chl.js             # Fallback JS del motor
+├── bridge/            # Memory Bridge (nuevo)
+│   ├── bridge.js      # Orchestrador
+│   ├── session.js     # Sesiones multi-turno
+│   ├── memory-context.js  # Formateo de contexto
+│   └── model-adapter.js   # Proveedores LLM
+├── neural/            # Capa de recuperación neuronal
+│   ├── neural-chl.js  # API cognitiva (v3, delegada al bridge)
+│   ├── chl-semantic-expert.js  # Navegación semántica multi-hop
+│   ├── embeddings.js  # Indexación vectorial
+│   ├── searcher.js    # Beam search sobre grafo
+│   ├── verifier.js    # Verificación local
+│   └── ...
+├── mcp.js             # Servidor MCP (herramientas para agentes)
+├── mcp-server.js      # Entry point del MCP
+└── ...
 ```
-
-Search for related memories:
-
-```bash
-curl -X POST http://127.0.0.1:3030/recall \
-  -H "content-type: application/json" \
-  -d '{
-    "query": "preferencia de idioma",
-    "topK": 5
-  }'
-```
-
-Ask CHL to infer an answer:
-
-```bash
-curl -X POST http://127.0.0.1:3030/infer \
-  -H "content-type: application/json" \
-  -d '{
-    "query": "Como debo responder al usuario?",
-    "topK": 5
-  }'
-```
-
-Export a backup:
-
-```bash
-curl -OJ http://127.0.0.1:3030/backup.memory
-```
-
-Restore a backup:
-
-```bash
-curl -X POST http://127.0.0.1:3030/restore.memory \
-  --data-binary @backup.memory
-```
-
-## Run the MCP Server
-
-Start the MCP transport server:
-
-```bash
-npm run serve:mcp
-```
-
-You can also use the CLI entrypoint:
-
-```bash
-chl-mcp
-```
-
-## MCP Tools
-
-The MCP server exposes these tools:
-
-- `chl_remember`
-- `chl_recall`
-- `chl_infer`
-- `chl_learn`
-- `chl_backup_memory`
-- `chl_lexicon`
-- `chl_lexicon_export`
-- `chl_restore_memory`
-- `chl_snapshot`
-- `chl_profile`
-- `chl_state`
-- `chl_entries`
-- `chl_journal`
-- `chl_bucket_stats`
-- `chl_clear`
-
-It also exposes these read-only resources:
-
-- `chl://memory`
-- `chl://profile`
-- `chl://state`
-- `chl://entries`
-- `chl://journal`
-- `chl://backup.memory`
-- `chl://lexicon`
-- `chl://lexicon.concepts`
-- `chl://lexicon.phrases`
-- `chl://lexicon.tsv`
-
-### Example MCP Usage
-
-- Use `chl_remember` when the user shares a stable fact, preference, or decision.
-- Use `chl_recall` when you need supporting context before answering.
-- Use `chl_infer` when the right answer depends on several stored memories.
-- Use `chl_learn` to reinforce a good pattern or correct a bad one.
-- Use `chl_backup_memory` before risky edits or migrations.
-- Use `chl_lexicon_export` when you want TSV output for reuse elsewhere.
-
-## Environment Variables
-
-- `CHL_PERSIST_PATH` - persistence path for memory state
-- `PORT` - port for the HTTP server
-
-## Testing
-
-Run the test suite:
-
-```bash
-npm test
-```
-
-## Evaluation
-
-There are benchmark and evaluation scripts available:
-
-```bash
-npm run eval
-npm run bench
-npm run bench:large
-npm run bench:huge
-```
-
-## Notes
-
-- The MCP server reads and writes memory through the native CHL implementation.
-- Backup restore operations can replace or merge depending on the `replace` flag.
-- Lexicon exports are available as TSV for reuse in other workflows.
-
-## Typical Use Cases
-
-- personal or project memory for an AI assistant
-- remembering user-specific preferences across sessions
-- storing decision history for long-running workflows
-- retrieving related context before drafting an answer
-- keeping a persistent backup of important conversational knowledge

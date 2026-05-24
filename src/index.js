@@ -22,6 +22,30 @@ const {
   tokenize,
 } = require("./utils");
 const { NativeCHL } = require("./native");
+const { analyzeText } = require("./analysis");
+const {
+  buildConsolidation,
+  episodePatternKey,
+  mergePairLists,
+  normalizeEpisodeExamples,
+} = require("./consolidation");
+const { buildConceptGraph } = require("./graph");
+const {
+  buildAnswer,
+  buildHypotheses,
+  buildPlan,
+  explainThought,
+  learnFromVerification,
+  scoreHypothesis,
+  verifyPlan,
+} = require("./thought");
+const {
+  composeDecisionResponse,
+  extractClaims,
+  renderDecisionExplanation,
+  renderDecisionText,
+  summarizePayload,
+} = require("./generation");
 const { createServer } = require("./server");
 const { callTool, createMcpContext, handleMcpMessage, listResources, listTools, readResource } = require("./mcp");
 const {
@@ -40,9 +64,55 @@ const {
   serializePairList,
 } = require("./concepts");
 
+// Neural layer (retrieval, no generation)
+const { NeuralCHL } = require("./neural/neural-chl");
+const { EmbeddingIndex, dotProduct, Vocabulary, DocumentVectorizer } = require("./neural/embeddings");
+const { NeuralVerifier } = require("./neural/verifier");
+const { NeuralSearcher } = require("./neural/searcher");
+const { HyperEmbed, bind, bundle, permute, similarity: hdcSimilarity } = require("./neural/hyperembed");
+const { ViterbiGenerator } = require("./neural/viterbi-gen");
+const { SpectralExtractor } = require("./neural/spectral-entities");
+const { HybridCHLTokenizer } = require("./neural/hybrid-chl-tokenizer");
+const { buildSemanticTensor, tensorToTrainingJsonl } = require("./semantic-tensor");
+
+// Bridge (modelos grandes)
+const { createBridge, quickTurn, Session } = require("./bridge/bridge");
+const { buildMemoryContext, buildCompactMemoryContext } = require("./bridge/memory-context");
+const { createAdapter, CHL_TOOLS_FOR_LLM } = require("./bridge/model-adapter");
+
 module.exports = {
+  // Core engine
   CHL: NativeCHL,
   JSCHL,
+  NativeCHL,
+
+  // Neural retrieval
+  NeuralCHL,
+  EmbeddingIndex,
+  dotProduct,
+  Vocabulary,
+  DocumentVectorizer,
+  NeuralVerifier,
+  NeuralSearcher,
+  HyperEmbed,
+  bind,
+  bundle,
+  permute,
+  hdcSimilarity,
+  ViterbiGenerator,
+  SpectralExtractor,
+  HybridCHLTokenizer,
+
+  // Memory bridge (modelos grandes)
+  createBridge,
+  quickTurn,
+  Session,
+  buildMemoryContext,
+  buildCompactMemoryContext,
+  createAdapter,
+  CHL_TOOLS_FOR_LLM,
+
+  // Memory
   AssociativeMemory,
   bindVectors,
   bundleVectors,
@@ -52,6 +122,24 @@ module.exports = {
   normalizeText,
   popcount32,
   popcountWords,
+  analyzeText,
+  buildConceptGraph,
+  buildConsolidation,
+  buildAnswer,
+  buildHypotheses,
+  buildPlan,
+  composeDecisionResponse,
+  explainThought,
+  extractClaims,
+  learnFromVerification,
+  episodePatternKey,
+  mergePairLists,
+  renderDecisionExplanation,
+  renderDecisionText,
+  scoreHypothesis,
+  summarizePayload,
+  verifyPlan,
+  normalizeEpisodeExamples,
   prototypeVectorFromText,
   semanticHash,
   semanticHashFromText,
@@ -77,4 +165,6 @@ module.exports = {
   tokenize,
   vectorFromSeed,
   writeMemoryArchive,
+  buildSemanticTensor,
+  tensorToTrainingJsonl,
 };

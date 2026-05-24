@@ -1,0 +1,9 @@
+node_modules/
+build/
+artifacts/
+.cache-node-headers/
+.venv/
+.venv-*/
+*.log
+chl-memory-data/
+.DS_Store

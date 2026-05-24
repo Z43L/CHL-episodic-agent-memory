@@ -107,6 +107,11 @@ function createServer(options = {}) {
         return;
       }
 
+      if (req.method === "GET" && req.url === "/graph") {
+        sendJson(res, 200, memory.conceptGraph());
+        return;
+      }
+
       if (req.method === "GET" && req.url === "/entries") {
         sendJson(res, 200, memory.entries());
         return;
@@ -114,6 +119,11 @@ function createServer(options = {}) {
 
       if (req.method === "GET" && req.url === "/journal") {
         sendJson(res, 200, memory.journal());
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/episodes") {
+        sendJson(res, 200, memory.episodes());
         return;
       }
 
@@ -170,6 +180,50 @@ function createServer(options = {}) {
       if (req.method === "POST" && req.url === "/infer") {
         const body = await readBody(req);
         const result = memory.infer(body.query ?? "", { topK: body.topK ?? 5 });
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/think") {
+        const body = await readBody(req);
+        const result = memory.think(body.query ?? "", { topK: body.topK ?? 5 });
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/ask") {
+        const body = await readBody(req);
+        const result = memory.ask(body.query ?? "", { topK: body.topK ?? 5 });
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/plan") {
+        const body = await readBody(req);
+        const result = memory.plan(body.query ?? "", { topK: body.topK ?? 5 });
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/verify") {
+        const body = await readBody(req);
+        const result = memory.verify(body.plan ?? body.query ?? "", { topK: body.topK ?? 5 });
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/learn-from-verification") {
+        const body = await readBody(req);
+        const result = memory.learnFromVerification(body.verification ?? body.plan ?? body.query ?? {}, {
+          extraSignals: body.extraSignals ?? [],
+        });
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/consolidate") {
+        const body = await readBody(req);
+        const result = memory.consolidateEpisodes(body ?? {});
         sendJson(res, 200, result);
         return;
       }
