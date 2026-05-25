@@ -260,6 +260,128 @@ class CHL {
     const second = result.candidates[1]?.score ?? 0;
     return clamp(0.5 * best + 0.5 * (best - second), 0, 1);
   }
+
+  // ─── MCP compatibility methods ───────────────────────
+
+  whenReady() {
+    return this.memory.whenReady();
+  }
+
+  entries() {
+    return this.memory.allEntries();
+  }
+
+  journal() {
+    this._journal = this._journal ?? [];
+    return this._journal;
+  }
+
+  episodes() {
+    return this.decisionEpisodes();
+  }
+
+  bucketStats() {
+    return this.memory.bucketStats();
+  }
+
+  learn(input, reward = 0) {
+    this._journal = this._journal ?? [];
+    this._journal.push({ type: "learn", text: typeof input === "string" ? input : JSON.stringify(input), reward });
+    return this.updateFeedback(input, reward);
+  }
+
+  consolidate(startIndex, minSupport) {
+    return this.consolidateEpisodes({ startIndex: startIndex ?? 0, minSupport: minSupport ?? 2 });
+  }
+
+  lexicon() {
+    if (this._lexiconTrainer) {
+      const snap = this._lexiconTrainer.snapshot();
+      return {
+        conceptPairs: snap.conceptPairs ?? 0,
+        prototypeCount: snap.prototypeCount ?? 0,
+        phraseCount: snap.phraseCount ?? 0,
+        collocations: snap.collocations ?? 0,
+        trainer: snap,
+      };
+    }
+    return { conceptPairs: 0, prototypeCount: 0, phraseCount: 0, collocations: 0 };
+  }
+
+  backupMemory() {
+    return this.saveMemory();
+  }
+
+  saveMemory(filePath) {
+    const fs = require("node:fs");
+    const data = {
+      format: "chl-js-v1",
+      version: "0.3.0",
+      entries: this.memory.allEntries(),
+      timestamp: new Date().toISOString(),
+    };
+    if (this._lexiconTrainer) {
+      data.lexicon = this._lexiconTrainer.snapshot();
+    }
+    const json = JSON.stringify(data, null, 2);
+    if (filePath) {
+      fs.writeFileSync(filePath, json, "utf8");
+      return { ok: true, path: filePath, entries: data.entries.length };
+    }
+    return json;
+  }
+
+  loadMemory(filePath, options = {}) {
+    const fs = require("node:fs");
+    let data;
+    if (options._data) {
+      data = options._data;
+    } else {
+      const raw = fs.readFileSync(filePath, "utf8");
+      data = JSON.parse(raw);
+    }
+    this.memory.clear();
+    for (const entry of data.entries ?? []) {
+      this.memory.insert(entry.text ?? entry.input, entry.payload, entry.metadata);
+    }
+    if (data.lexicon && this._lexiconTrainer) {
+      // Restaurar prototipos desde el snapshot guardado
+      const snap = data.lexicon;
+      if (snap.concepts && this._lexiconTrainer._prototypes) {
+        const { ConceptPrototype } = require("./lexiconLearner");
+        for (const [conceptId, protoData] of Object.entries(snap.concepts)) {
+          this._lexiconTrainer._prototypes.set(
+            conceptId,
+            ConceptPrototype.fromJSON(protoData, {
+              hyperDim: this._lexiconTrainer.hyperDim,
+              seed: this._lexiconTrainer.seed,
+            })
+          );
+        }
+      }
+      if (snap.phraseIndex && this._lexiconTrainer.phraseIndex) {
+        const { PhraseAliasIndex } = require("./lexiconLearner");
+        this._lexiconTrainer.phraseIndex = PhraseAliasIndex.fromJSON(snap.phraseIndex, {
+          hyperDim: this._lexiconTrainer.hyperDim,
+          seed: this._lexiconTrainer.seed,
+        });
+      }
+    }
+    return { ok: true, entriesLoaded: data.entries?.length ?? 0 };
+  }
+
+  restoreMemory(buffer, options = {}) {
+    try {
+      const data = typeof buffer === "string" ? JSON.parse(buffer) : buffer;
+      return this.loadMemory(null, { ...options, _data: data });
+    } catch (e) {
+      throw new Error("Invalid backup format: " + e.message);
+    }
+  }
+
+  snapshot() {
+    return this.memory.snapshot();
+  }
 }
 
 module.exports = {

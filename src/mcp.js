@@ -72,6 +72,19 @@ function toolDefinitions() {
   return [
     // ─── Core memory tools ────────────────────────────────
     {
+      name: "chl_init",
+      description: "Inicializa o reinicia la memoria CHL completamente. Carga el estado de bootstrap del lexicón y restablece todos los índices. Úsalo al inicio de una sesión o cuando necesites limpiar y empezar de cero.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          profile: { type: "string", description: "Perfil de memoria: small, medium, large (default: large en frontier)" },
+          seed: { type: "number", description: "Semilla para vectores (default: 42)" },
+          reset: { type: "boolean", description: "Si true, hace clear() completo antes de reinicializar (default: true)" },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
       name: "chl_remember",
       description: "Store a memory entry in CHL.",
       inputSchema: {
@@ -418,6 +431,51 @@ async function callTool(context, name, args) {
 
   switch (name) {
     // ─── Core ─────────────────────────────────────────────
+    case "chl_init": {
+      const shouldReset = args.reset !== false;
+      if (shouldReset && typeof mem.clear === "function") {
+        mem.clear();
+      }
+      // Reinicializar con nuevo perfil si se especifica
+      if (args.profile || args.seed) {
+        const { CHL: JSCHL } = require("./chl");
+        const { initFrontier } = require("./mcp-frontier");
+        const { resolveMemoryProfile } = require("./profiles");
+        const newProfile = args.profile ?? "large";
+        const newOpts = resolveMemoryProfile({ profile: newProfile, seed: args.seed ?? 42 });
+        if (context._frontierMode) {
+          const frontier = initFrontier({
+            artifactsDir: undefined,
+            seed: args.seed ?? 42,
+          });
+          const newEngine = new JSCHL({
+            ...newOpts,
+            lexiconTrainer: frontier.trainer,
+            attention: frontier.attention,
+          });
+          newEngine._frontier = frontier;
+          context.memory = newEngine;
+        } else {
+          const { NativeCHL } = require("./native");
+          context.memory = new NativeCHL(newOpts);
+        }
+      }
+      // Cargar estado del lexicón desde bootstrap
+      if (context._frontierMode && context.memory._frontier) {
+        const { trainer } = context.memory._frontier;
+        if (trainer && typeof trainer.load === "function") {
+          trainer.load();
+        }
+      }
+      result = {
+        ok: true,
+        action: "initialized",
+        profile: context.memory.profile?.(),
+        entries: context.memory.entries?.()?.length ?? 0,
+        frontier: context._frontierMode,
+      };
+      break;
+    }
     case "chl_remember": {
       mem.remember(args.input, args.payload, args.metadata);
       result = { ok: true, action: "remembered" };
@@ -496,15 +554,20 @@ async function callTool(context, name, args) {
       break;
     }
     case "chl_lexicon": {
-      const lex = mem.lexicon?.() ?? { concepts: [], phrases: [] };
-      result = { concepts: lex.concepts?.length ?? 0, phrases: lex.phrases?.length ?? 0 };
+      const lex = mem.lexicon?.() ?? { conceptPairs: 0, prototypeCount: 0, phraseCount: 0 };
+      result = {
+        conceptPairs: lex.conceptPairs ?? lex.concepts?.length ?? 0,
+        prototypeCount: lex.prototypeCount ?? 0,
+        phraseCount: lex.phraseCount ?? lex.phrases?.length ?? 0,
+        trainer: lex.trainer ?? null,
+      };
       break;
     }
     case "chl_lexicon_export": {
-      const l = mem.lexicon?.() ?? { concepts: [], phrases: [] };
+      const l = mem.lexicon?.() ?? { conceptPairs: 0, prototypeCount: 0, phraseCount: 0 };
       result = {
-        concepts: serializePairList(l.concepts ?? []),
-        phrases: serializePairList(l.phrases ?? []),
+        ...l,
+        trainerSnapshot: l.trainer ?? null,
       };
       break;
     }
@@ -928,7 +991,7 @@ function handleMcpMessage(context, message) {
     return {
       jsonrpc: "2.0",
       id: message.id,
-      result: listTools(),
+      result: listTools(context),
     };
   }
 

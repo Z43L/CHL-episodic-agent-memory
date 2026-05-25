@@ -704,6 +704,28 @@ class AssociativeMemory {
     this.tokenMaps.forEach((map) => map.clear());
     this.payloadTokenMaps.forEach((map) => map.clear());
   }
+
+  allEntries() {
+    return Array.from(this.entries.values());
+  }
+
+  bucketStats() {
+    const bandSizes = this.bandMaps.map(m => m.size);
+    const textMapSize = this.textMap.size;
+    const totalEntries = this.entries.size;
+    return {
+      totalEntries,
+      bands: this.bandMaps.length,
+      bandSizes,
+      occupiedBuckets: bandSizes.reduce((a, b) => a + b, 0),
+      textMapSize,
+      conceptIndexSize: this.conceptIndex.size,
+    };
+  }
+
+  whenReady() {
+    return Promise.resolve();
+  }
 }
 
 module.exports = {
