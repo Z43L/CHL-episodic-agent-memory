@@ -10,6 +10,8 @@
  */
 
 const { tokenize, charNgrams, normalizeText } = require("../utils");
+const { HyperAttentionContext } = require("../hyperattention");
+const { LexiconTrainer } = require("../lexiconLearner");
 
 const NEGATION_TOKENS = new Set(["no", "sin", "nunca", "jamas", "tampoco", "nadie", "nada", "ningun", "ninguno", "ninguna"]);
 const PRESERVE_TOKENS = NEGATION_TOKENS;
@@ -160,6 +162,10 @@ class EmbeddingIndex {
     this.maxEntries = options.maxEntries ?? 20000;
     this.negationMismatchPenalty = options.negationMismatchPenalty ?? 0.5;
     this._built = false;
+    // HyperAttention opcional
+    this.attention = options.attention ?? null;
+    // LexiconTrainer opcional
+    this.lexiconTrainer = options.lexiconTrainer ?? null;
   }
 
   async index(text, payload = null, metadata = {}) {
@@ -211,6 +217,12 @@ class EmbeddingIndex {
     const vecResult = this.vectorizer.vectorize(text);
     const queryNegated = vecResult.negated;
 
+    // Pre-computar hypervector de query para scoring extendido
+    const { prototypeVectorFromText } = require("../hypervector");
+    const queryHV = this.lexiconTrainer || this.attention
+      ? prototypeVectorFromText(text, this.hyperDim ?? 256, 0)
+      : null;
+    
     const scored = [];
     for (const [id, entry] of this.entries) {
       let sim = dotProduct(vecResult.features, entry.sparseVec);
@@ -220,7 +232,19 @@ class EmbeddingIndex {
       const ageMs = Math.max(0, Date.now() - (entry.lastAccessAt ?? 0));
       const recency = Math.exp(-ageMs / (30 * 60 * 1000));
       const quality = Math.max(0, Math.min(1, (entry.metadata.quality ?? 5) / 10));
-      const score = sim + 0.0001 * recency + 0.00005 * quality;
+      
+      let score = sim + 0.0001 * recency + 0.00005 * quality;
+      
+      // Scoring extendido con LexiconTrainer
+      if (this.lexiconTrainer && queryHV) {
+        const conceptId = this.lexiconTrainer.resolveConcept(entry.text ?? "");
+        if (conceptId) {
+          const protoSim = this.lexiconTrainer.prototypeSimilarity(queryHV, conceptId);
+          const intentSim = this.lexiconTrainer.intentSimilarity(entry.text ?? "", conceptId);
+          score += 0.08 * protoSim + 0.06 * intentSim;
+        }
+      }
+      
       scored.push({ entry, similarity: sim, score });
     }
 

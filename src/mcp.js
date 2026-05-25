@@ -6,34 +6,57 @@ const { evaluateInteraction, buildMemoryEntry, buildMemoryPayload, buildMemoryMe
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 function createMcpContext(options = {}) {
+  const frontierMode = process.env.CHL_FRONTIER === "true" || options.frontier === true;
+  
   const memoryOptions = resolveMemoryProfile({
     ...(options.memory ?? {}),
-    profile: options.profile ?? (options.memory ?? {}).profile,
+    profile: options.profile ?? (options.memory ?? {}).profile ?? (frontierMode ? "large" : undefined),
     persistPath:
       (options.memory ?? {}).persistPath ??
       process.env.CHL_PERSIST_PATH ??
       null,
   });
   const deferMemoryInit = options.deferMemoryInit === true;
+  
   const createMemory = () => {
+    if (frontierMode) {
+      // Frontier mode: usar JSCHL con componentes de aprendizaje
+      const { CHL: JSCHL } = require("./chl");
+      const { initFrontier } = require("./mcp-frontier");
+      const frontier = initFrontier({ 
+        artifactsDir: options.artifactsDir ?? undefined,
+        seed: memoryOptions.seed ?? 42,
+      });
+      const engine = new JSCHL({
+        ...memoryOptions,
+        lexiconTrainer: frontier.trainer,
+        attention: frontier.attention,
+      });
+      // Adjuntar frontier al engine para acceso desde herramientas
+      engine._frontier = frontier;
+      return engine;
+    }
     const { NativeCHL } = require("./native");
     return new NativeCHL(memoryOptions);
   };
 
   const autoRememberMode = process.env.CHL_AUTO_REMEMBER || "smart";
 
-  return {
+  const ctx = {
     memory: deferMemoryInit ? null : createMemory(),
     _createMemory: createMemory,
     serverInfo: {
-      name: "chl-memory",
-      version: "0.2.0",
+      name: frontierMode ? "chl-memory-frontier" : "chl-memory",
+      version: frontierMode ? "0.3.0" : "0.2.0",
     },
     autoRemember: {
       enabled: autoRememberMode !== "off" && autoRememberMode !== "false",
       mode: autoRememberMode === "all" ? "all" : "smart",
     },
+    _frontierMode: frontierMode,
   };
+  
+  return ctx;
 }
 
 async function ensureMemoryReady(context) {
@@ -380,6 +403,17 @@ async function callTool(context, name, args) {
   const mem = context.memory;
   if (!mem) throw new Error("CHL memory not ready");
 
+  // Frontier tools — delegar al handler especializado
+  if (context._frontierMode && mem._frontier) {
+    const { handleFrontierTool, frontierToolDefinitions } = require("./mcp-frontier");
+    const frontierTools = new Set(frontierToolDefinitions().map(t => t.name));
+    if (frontierTools.has(name)) {
+      const ctx = { _engine: mem, _frontier: mem._frontier };
+      const frontierResult = await handleFrontierTool(name, args, ctx);
+      return { content: [{ type: "text", text: JSON.stringify(frontierResult) }] };
+    }
+  }
+
   let result = null;
 
   switch (name) {
@@ -394,10 +428,10 @@ async function callTool(context, name, args) {
       result = {
         confidence: recall.confidence,
         candidates: (recall.candidates ?? []).map((c) => ({
-          id: c.id,
-          text: c.text ?? c.entry?.text,
-          score: c.score,
-          payload: c.payload ?? c.entry?.payload,
+          id: c.id ?? c.entry?.id ?? "",
+          text: c.text ?? c.entry?.text ?? "",
+          score: c.score ?? 0,
+          payload: c.payload ?? c.entry?.payload ?? null,
         })),
       };
       break;
@@ -680,8 +714,13 @@ async function callTool(context, name, args) {
   };
 }
 
-function listTools() {
-  return { tools: toolDefinitions() };
+function listTools(context) {
+  const tools = toolDefinitions();
+  if (context?._frontierMode) {
+    const { frontierToolDefinitions } = require("./mcp-frontier");
+    tools.push(...frontierToolDefinitions());
+  }
+  return { tools };
 }
 
 function listResources(context) {

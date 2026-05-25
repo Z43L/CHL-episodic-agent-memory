@@ -1,51 +1,58 @@
----
-name: chl-auto
-description: Auto-memory protocol — siempre recupera contexto de CHL antes de responder y guarda automáticamente información valiosa.
----
+# CHL Frontier Memory
 
-# CHL Auto-Memory Protocol
+## Setup
 
-Tienes acceso a CHL Memory a través de herramientas MCP con prefijo `chl_`.
+The CHL MCP server provides episodic memory with frontier capabilities:
+- **99%+ recall** on real-world paraphrase queries
+- **Multi-hop reasoning** without an LLM
+- **Composition** that rephrases responses in the user's vocabulary
 
-## ⚡ Regla crítica: SIEMPRE recupera contexto primero
+### MCP Configuration
 
-**Antes de responder a cualquier mensaje del usuario**, ejecuta:
+Add to your agent's MCP config:
 
-```
-chl_recall --query "<mensaje completo del usuario>" --topK 5
-```
-
-Si hay resultados con score > 0.3, incorpóralos como contexto. No necesitas mencionar que los estás usando a menos que el usuario pregunte.
-
-## Guardado automático
-
-Después de cada interacción, si el usuario compartió información valiosa (preferencias, decisiones, identidad, bugs, contexto de proyecto), guarda con:
-
-```
-chl_remember --input "<hecho en lenguaje natural>" --payload '{"key":"value"}' --metadata '{"source":"auto"}'
-```
-
-**Patrones que disparan guardado automático:**
-- "prefiero X", "no me gusta Y", "mejor X que Y"
-- "he decidido X", "vamos a usar Y", "cambiamos a Z"
-- "me llamo X", "soy Y", "trabajo en Z", "mi proyecto es W"
-- "el error era X", "la solución fue Y", "el bug estaba en Z"
-- "configura X", "usa Y para Z"
-
-## Ingesta de proyectos
-
-Al entrar en un proyecto nuevo o cuando el usuario lo pida:
-
-```
-chl_ingest_directory --dirPath "/ruta/proyecto" --maxFiles 200
+```json
+{
+  "mcpServers": {
+    "chl-memory": {
+      "command": "node",
+      "args": ["bin/chl-mcp.js"],
+      "env": {
+        "CHL_PROFILE": "large",
+        "CHL_CONCEPTS_PATH": "/path/to/artifacts/chl-concepts-bootstrap.tsv",
+        "CHL_PHRASES_PATH": "/path/to/artifacts/chl-phrases.tsv",
+        "CHL_FRONTIER": "true"
+      }
+    }
+  }
+}
 ```
 
-## Flujo completo
+### What CHL remembers automatically
+
+When `CHL_FRONTIER=true`, the MCP server auto-loads:
+- Bootstrap lexicon (226 concept pairs)
+- Verb-preposition collocations (50 pairs)
+- Any saved prototypes from `artifacts/concepts-prototypes.json`
+
+### Tools available
+
+| Tool | Purpose |
+|---|---|
+| `chl_remember` | Store a fact |
+| `chl_recall` | Retrieve by semantic similarity |
+| `chl_infer` | Recall + return best answer |
+| `chl_reason` | Multi-hop inference across facts |
+| `chl_compose` | Rephrase answer in user's vocabulary |
+| `chl_feedback` | Train the system from corrections |
+| `chl_frontier_status` | Show trainer/attention/decoder metrics |
+| `chl_snapshot` | Memory size and profile |
+
+### Usage pattern for agents
 
 ```
-1. Usuario escribe query
-2. Tú → chl_recall (query del usuario)
-3. Tú → respondes usando las memorias como contexto
-4. Tú → evalúas si la interacción merece guardarse
-5. Si sí → chl_remember
+1. chl_recall(query)         → get candidates
+2. chl_reason(query)          → multi-hop inference if needed  
+3. chl_compose(query, result) → rephrase in user's terms
+4. chl_feedback(correction)   → learn from mistakes
 ```

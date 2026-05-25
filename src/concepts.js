@@ -300,14 +300,21 @@ function serializePairList(pairs = []) {
   return lines.join("\n");
 }
 
-function loadLexiconState({ conceptsPath = null, phrasesPath = null } = {}) {
-  return {
+function loadLexiconState({ conceptsPath = null, phrasesPath = null, prototypesPath = null } = {}) {
+  const result = {
     concepts: loadConceptPairsFromFile(conceptsPath),
     phrases: loadPhrasePairsFromFile(phrasesPath),
   };
+  if (prototypesPath && fs.existsSync(prototypesPath)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(prototypesPath, "utf8"));
+      result.prototypes = raw ?? null;
+    } catch (_) { /* ignore malformed prototypes */ }
+  }
+  return result;
 }
 
-function saveLexiconState(state = {}, { conceptsPath = null, phrasesPath = null } = {}) {
+function saveLexiconState(state = {}, { conceptsPath = null, phrasesPath = null, prototypesPath = null } = {}) {
   const concepts = Array.isArray(state.concepts) ? state.concepts : [];
   const phrases = Array.isArray(state.phrases) ? state.phrases : [];
   if (conceptsPath) {
@@ -318,11 +325,17 @@ function saveLexiconState(state = {}, { conceptsPath = null, phrasesPath = null 
     fs.mkdirSync(require("node:path").dirname(phrasesPath), { recursive: true });
     fs.writeFileSync(phrasesPath, serializePairList(phrases));
   }
+  if (prototypesPath && state.prototypes) {
+    fs.mkdirSync(require("node:path").dirname(prototypesPath), { recursive: true });
+    fs.writeFileSync(prototypesPath, JSON.stringify(state.prototypes, null, 2));
+  }
   return {
     conceptsPath,
     phrasesPath,
+    prototypesPath: prototypesPath ?? null,
     concepts: concepts.length,
     phrases: phrases.length,
+    prototypes: state.prototypes ? true : false,
   };
 }
 

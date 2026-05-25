@@ -64,6 +64,13 @@ function buildConsolidation(episodes = [], options = {}) {
   const groups = new Map();
   const examples = normalizeEpisodeExamples(episodes);
   const conceptPairCounts = new Map();
+  
+  // LexiconTrainer batch (si está disponible)
+  const lexiconTrainer = options.lexiconTrainer ?? null;
+  let trainerResult = null;
+  if (lexiconTrainer) {
+    trainerResult = lexiconTrainer.trainBatch(episodes);
+  }
 
   for (const example of examples) {
     const queryAnalysis = analyzeText(example.source);
@@ -140,12 +147,14 @@ function buildConsolidation(episodes = [], options = {}) {
     phrasePairs: learnedPhrasePairs,
     rules,
     nextEpisodeIndex: episodes.length,
+    trainerResult: trainerResult ?? null,
     summary: {
       processedCount: examples.length,
       patternCount: groups.size,
       ruleCount: rules.length,
       conceptPairCount: mergedConceptPairs.length,
       phrasePairCount: learnedPhrasePairs.length,
+      trainerUpdates: trainerResult?.updates ?? 0,
     },
   };
 }

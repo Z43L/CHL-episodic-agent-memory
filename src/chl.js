@@ -24,11 +24,16 @@ const { clamp } = require("./utils");
 
 class CHL {
   constructor(options = {}) {
-    this.options = resolveMemoryProfile({
+    const memOpts = {
       ...options,
       seed: options.seed ?? 0,
-    });
+      lexiconTrainer: options.lexiconTrainer ?? null,
+      attention: options.attention ?? null,
+    };
+    this.options = resolveMemoryProfile(memOpts);
     this.memory = new AssociativeMemory(this.options);
+    this._lexiconTrainer = options.lexiconTrainer ?? null;
+    this._attention = options.attention ?? null;
     this._decisionEpisodes = [];
     this._lastConsolidatedEpisodeIndex = 0;
     this.autoConsolidationEvery = Math.max(0, Math.floor(Number(this.options.autoConsolidationEvery ?? 0) || 0));
@@ -58,6 +63,10 @@ class CHL {
 
   remember(input, payload = null, metadata = {}) {
     return this.memory.insert(input, payload, metadata);
+  }
+
+  rememberBatch(batch = []) {
+    return this.memory.insertBatch(batch);
   }
 
   recall(query, options = {}) {

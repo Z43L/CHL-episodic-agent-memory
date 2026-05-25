@@ -64,6 +64,22 @@ const {
   serializePairList,
 } = require("./concepts");
 
+// Lexicon learner (capa de aprendizaje semántico)
+const {
+  ConceptPrototype,
+  ContrastiveFeedback,
+  PhraseAliasIndex,
+  IntentClusterer,
+  LexiconTrainer,
+} = require("./lexiconLearner");
+
+// HyperAttention (pesos dinámicos)
+const { HyperAttentionContext, DEFAULT_SCORING_DIMS } = require("./hyperattention");
+
+// HyperDecoder (composición generativa)
+const { HyperDecoder } = require("./hyperdecoder");
+const { HyperReason } = require("./hyperreason");
+
 // Neural layer (retrieval, no generation)
 const { NeuralCHL } = require("./neural/neural-chl");
 const { EmbeddingIndex, dotProduct, Vocabulary, DocumentVectorizer } = require("./neural/embeddings");
@@ -167,6 +183,23 @@ module.exports = {
   writeMemoryArchive,
   buildSemanticTensor,
   tensorToTrainingJsonl,
+
+  // Lexicon learner
+  ConceptPrototype,
+  ContrastiveFeedback,
+  PhraseAliasIndex,
+  IntentClusterer,
+  LexiconTrainer,
+
+  // HyperAttention
+  HyperAttentionContext,
+  DEFAULT_SCORING_DIMS,
+
+  // HyperDecoder
+  HyperDecoder,
+
+  // HyperReason
+  HyperReason,
 };
 
 // ─── Añadidos en v0.2.0 ──────────────────────────────────

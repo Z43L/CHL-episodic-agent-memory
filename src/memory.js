@@ -9,6 +9,8 @@ const {
   similarity,
   vectorFromSeed,
 } = require("./hypervector");
+const { HyperAttentionContext } = require("./hyperattention");
+const { LexiconTrainer } = require("./lexiconLearner");
 const { clamp, charNgrams, normalizeText, tokenize, wordsToHex } = require("./utils");
 const crypto = require("crypto");
 
@@ -148,7 +150,14 @@ class AssociativeMemory {
     this.seed = options.seed ?? 0;
     this.recentHalfLifeMs = options.recentHalfLifeMs ?? 30 * 60 * 1000;
     this.bitBias = new Float64Array(this.bitCount);
+    // HyperAttention opcional
+    this.attention = options.attention ?? null;
+    // LexiconTrainer opcional
+    this.lexiconTrainer = options.lexiconTrainer ?? null;
+    this.conceptIndex = new Map();  // conceptId → Set<entryId>
     this.entries = new Map();
+    this._evictionHeap = [];
+    this._evictionVersion = 0;
     this.bandMaps = [];
     this.textMap = new Map();
     this.canonicalTextMap = new Map();
@@ -168,6 +177,22 @@ class AssociativeMemory {
       seed: this.seed,
       bitBias: this.bitBias,
     });
+  }
+
+  /**
+   * Canonicaliza texto usando un mapa específico (conservador).
+   * Solo reemplaza tokens, no usa phraseIndex.
+   */
+  _canonicalizeWithMap(text, map) {
+    let result = text;
+    const tokens = result.toLowerCase().split(/[^a-z0-9]+/g).filter(Boolean);
+    for (const token of tokens) {
+      const canonical = map.get(token);
+      if (canonical && canonical !== token) {
+        result = result.replace(new RegExp('\\b' + token + '\\b', 'g'), canonical);
+      }
+    }
+    return result;
   }
 
   makeEntry(input, payload = null, metadata = {}) {
@@ -201,6 +226,16 @@ class AssociativeMemory {
     this._indexText(this.canonicalTextMap, entry.representations?.canonicalText ?? "", entry.id);
     this._indexText(this.textMap, entry.payloadRepresentations?.normalizedText ?? "", entry.id);
     this._indexText(this.canonicalTextMap, entry.payloadRepresentations?.canonicalText ?? "", entry.id);
+    // Indexar por concepto si hay trainer
+    if (this.lexiconTrainer) {
+      const conceptId = this.lexiconTrainer.resolveConcept(entry.text ?? "");
+      if (conceptId) {
+        if (!this.conceptIndex.has(conceptId)) {
+          this.conceptIndex.set(conceptId, new Set());
+        }
+        this.conceptIndex.get(conceptId).add(entry.id);
+      }
+    }
     for (let bandIndex = 0; bandIndex < this.bandCount; bandIndex += 1) {
       const key = makeBandKey(entry.hash, bandIndex, this.wordsPerBand);
       let bucket = this.bandMaps[bandIndex].get(key);
@@ -229,6 +264,16 @@ class AssociativeMemory {
     this._unindexText(this.canonicalTextMap, entry.representations?.canonicalText ?? "", entry.id);
     this._unindexText(this.textMap, entry.payloadRepresentations?.normalizedText ?? "", entry.id);
     this._unindexText(this.canonicalTextMap, entry.payloadRepresentations?.canonicalText ?? "", entry.id);
+    // Desindexar concepto
+    if (this.lexiconTrainer) {
+      const conceptId = this.lexiconTrainer.resolveConcept(entry.text ?? "");
+      if (conceptId && this.conceptIndex.has(conceptId)) {
+        this.conceptIndex.get(conceptId).delete(entry.id);
+        if (this.conceptIndex.get(conceptId).size === 0) {
+          this.conceptIndex.delete(conceptId);
+        }
+      }
+    }
     for (let bandIndex = 0; bandIndex < this.bandCount; bandIndex += 1) {
       const key = makeBandKey(entry.hash, bandIndex, this.wordsPerBand);
       const bucket = this.bandMaps[bandIndex].get(key);
@@ -313,13 +358,28 @@ class AssociativeMemory {
       merged.prototypeCount += 1;
       this.indexEntry(merged);
       this.entries.set(merged.id, merged);
+      this._touchEviction(merged);
       return merged;
     }
 
     this.entries.set(entry.id, entry);
     this.indexEntry(entry);
+    this._touchEviction(entry);
     this._enforceCapacity();
     return entry;
+  }
+
+  insertBatch(batch = []) {
+    const inserted = [];
+    for (const item of batch) {
+      if (!item) continue;
+      const input = item.input ?? item.text ?? "";
+      const payload = item.payload ?? null;
+      const metadata = item.metadata ?? {};
+      const entry = this.insert(input, payload, metadata);
+      if (entry) inserted.push(entry);
+    }
+    return inserted;
   }
 
   _mergePayloads(previous, next) {
@@ -401,19 +461,58 @@ class AssociativeMemory {
     for (const id of bucket) ids.add(id);
   }
 
-  _scoreCandidate(queryReps, queryHash, queryHypervector, entry) {
+  _scoreCandidate(queryReps, queryHash, queryHypervector, entry, options = {}) {
     const hashSim = 1 - hammingDistance(queryHash, entry.hash) / this.bitCount;
     const hvSim = similarity(queryHypervector, entry.hypervector);
     const entryReps = entry.representations ?? buildRepresentations(entry.text ?? "");
     const { concept, negationMatch } = representationSimilarity(queryReps, entryReps);
+    if (options.fastEval) {
+      return 0.42 * hashSim + 0.38 * hvSim + 0.18 * concept + 0.02 * negationMatch;
+    }
     const ageMs = Math.max(0, Date.now() - entry.lastAccessAt);
     const recency = Math.exp(-ageMs / this.recentHalfLifeMs);
     const quality = clamp(entry.quality / 10, 0, 1);
-    return 0.34 * hashSim + 0.30 * hvSim + 0.22 * concept + 0.10 * recency + 0.04 * quality + 0.02 * negationMatch;
+    
+    // Prototype similarity (from lexicon trainer)
+    let protoSim = 0;
+    let intentSim = 0;
+    if (this.lexiconTrainer) {
+      const conceptId = this.lexiconTrainer.resolveConcept(entry.text ?? "");
+      if (conceptId) {
+        protoSim = this.lexiconTrainer.prototypeSimilarity(queryHypervector, conceptId);
+        intentSim = this.lexiconTrainer.intentSimilarity(entry.text ?? "", conceptId);
+      }
+    }
+    
+    // Si hay HyperAttention, usar pesos dinámicos
+    if (this.attention) {
+      const dimScores = {
+        hash: hashSim,
+        hypervector: hvSim,
+        concept: concept,
+        prototype: protoSim,
+        intent: intentSim,
+        recency: recency,
+        quality: quality,
+        negation: negationMatch,
+      };
+      return this.attention.score(queryHypervector, dimScores);
+    }
+    
+    // Fallback: pesos fijos (con nuevos términos)
+    return 0.22 * hashSim + 0.18 * hvSim + 0.16 * concept + 0.18 * protoSim + 0.12 * intentSim + 0.08 * recency + 0.04 * quality + 0.02 * negationMatch;
   }
 
   query(input, options = {}) {
-    const text = typeof input === "string" ? input : JSON.stringify(input);
+    let text = typeof input === "string" ? input : JSON.stringify(input);
+    // Canonicalizar query con trainer para matching mejorado
+    if (this.lexiconTrainer) {
+      const canonMap = this.lexiconTrainer._canonMap ?? this.lexiconTrainer.conceptMap;
+      const canonicalized = this._canonicalizeWithMap(text, canonMap);
+      if (canonicalized && canonicalized !== text) {
+        text = canonicalized;
+      }
+    }
     const queryReps = buildRepresentations(text);
     const queryHash = this.encodeText(text);
     const queryHypervector = prototypeVectorFromText(text, this.hyperDim, this.seed);
@@ -422,15 +521,48 @@ class AssociativeMemory {
       .map((entry) => ({
         entry,
         hashDistance: hammingDistance(queryHash, entry.hash),
-        score: this._scoreCandidate(queryReps, queryHash, queryHypervector, entry),
+        score: this._scoreCandidate(queryReps, queryHash, queryHypervector, entry, options),
       }))
       .sort((a, b) => b.score - a.score);
+    
+    // Two-pass retrieval: si top-1 es débil, expandir candidatos por concepto/alias
+    const top1Threshold = options.secondPassThreshold ?? 0.72;
+    const shouldExpand = !options.disableSecondPass && this.lexiconTrainer
+      && (scored.length === 0 || (scored[0]?.score ?? 0) < top1Threshold);
+    if (shouldExpand) {
+      const conceptCandidates = new Set();
+      const queryConcept = this.lexiconTrainer.resolveConcept(text);
+      if (queryConcept && this.conceptIndex.has(queryConcept)) {
+        for (const id of this.conceptIndex.get(queryConcept)) conceptCandidates.add(id);
+      }
+      // Expandir por frases detectadas en query
+      const phrases = this.lexiconTrainer.phraseIndex.extractPhrases(text);
+      for (const phrase of phrases) {
+        const best = this.lexiconTrainer.phraseIndex.bestConcept(phrase);
+        if (best?.conceptId && this.conceptIndex.has(best.conceptId)) {
+          for (const id of this.conceptIndex.get(best.conceptId)) conceptCandidates.add(id);
+        }
+      }
+      const existingIds = new Set(scored.map((s) => s.entry?.id).filter(Boolean));
+      for (const id of conceptCandidates) {
+        if (existingIds.has(id)) continue;
+        const entry = this.entries.get(id);
+        if (!entry) continue;
+        scored.push({
+          entry,
+          hashDistance: hammingDistance(queryHash, entry.hash),
+          score: this._scoreCandidate(queryReps, queryHash, queryHypervector, entry, options),
+        });
+      }
+      scored.sort((a, b) => b.score - a.score);
+    }
 
     scored.splice(options.topK ?? 5);
 
     if (scored[0]) {
       scored[0].entry.lastAccessAt = Date.now();
       scored[0].entry.accessCount += 1;
+      this._touchEviction(scored[0].entry);
     }
 
     return {
@@ -448,7 +580,7 @@ class AssociativeMemory {
     return clamp(0.5 * scored[0].score + 0.5 * margin, 0, 1);
   }
 
-  learnFromFeedback(input, reward = 0) {
+  learnFromFeedback(input, reward = 0, metadata = {}) {
     const text = typeof input === "string" ? input : JSON.stringify(input);
     const signature = this.encodeText(text);
     const rate = reward >= 0 ? 0.05 : 0.03;
@@ -456,6 +588,14 @@ class AssociativeMemory {
       const bit = (signature[i >>> 5] >>> (i & 31)) & 1;
       this.bitBias[i] += rate * reward * (bit ? 1 : -1);
       this.bitBias[i] = clamp(this.bitBias[i], -4, 4);
+    }
+    // Si hay lexiconTrainer y feedback negativo, aplicar contraste
+    if (this.lexiconTrainer && reward < 0) {
+      const selectedId = metadata.selectedConceptId ?? null;
+      const rejectedIds = metadata.rejectedConceptIds ?? [];
+      if (selectedId) {
+        this.lexiconTrainer.applyOnlineFeedback(text, selectedId, rejectedIds);
+      }
     }
   }
 
@@ -474,19 +614,71 @@ class AssociativeMemory {
     }
     entry.updatedAt = Date.now();
     this.indexEntry(entry);
+    this._touchEviction(entry);
     return entry;
+  }
+
+  _evictionPriority(entry) {
+    if (!entry) return Number.NEGATIVE_INFINITY;
+    const quality = Number(entry.quality ?? 0);
+    const access = Number(entry.lastAccessAt ?? 0);
+    // Menor prioridad = candidato a expulsión.
+    return quality * 1e12 + access;
+  }
+
+  _heapPush(node) {
+    const heap = this._evictionHeap;
+    heap.push(node);
+    let idx = heap.length - 1;
+    while (idx > 0) {
+      const parent = Math.floor((idx - 1) / 2);
+      if (heap[parent].priority <= heap[idx].priority) break;
+      [heap[parent], heap[idx]] = [heap[idx], heap[parent]];
+      idx = parent;
+    }
+  }
+
+  _heapPop() {
+    const heap = this._evictionHeap;
+    if (heap.length === 0) return null;
+    const root = heap[0];
+    const last = heap.pop();
+    if (heap.length > 0 && last) {
+      heap[0] = last;
+      let idx = 0;
+      while (true) {
+        const left = idx * 2 + 1;
+        const right = idx * 2 + 2;
+        let smallest = idx;
+        if (left < heap.length && heap[left].priority < heap[smallest].priority) smallest = left;
+        if (right < heap.length && heap[right].priority < heap[smallest].priority) smallest = right;
+        if (smallest === idx) break;
+        [heap[idx], heap[smallest]] = [heap[smallest], heap[idx]];
+        idx = smallest;
+      }
+    }
+    return root;
+  }
+
+  _touchEviction(entry) {
+    if (!entry?.id) return;
+    this._evictionVersion += 1;
+    entry._evictionVersion = this._evictionVersion;
+    this._heapPush({
+      id: entry.id,
+      version: entry._evictionVersion,
+      priority: this._evictionPriority(entry),
+    });
   }
 
   _enforceCapacity() {
     if (this.entries.size <= this.maxEntries) return;
-    const entries = Array.from(this.entries.values()).sort((a, b) => {
-      const ageScore = (Date.now() - b.lastAccessAt) - (Date.now() - a.lastAccessAt);
-      const qualityScore = a.quality - b.quality;
-      return ageScore + qualityScore;
-    });
-    while (entries.length > this.maxEntries) {
-      const victim = entries.pop();
-      if (!victim) break;
+    while (this.entries.size > this.maxEntries) {
+      const node = this._heapPop();
+      if (!node) break;
+      const victim = this.entries.get(node.id);
+      if (!victim) continue;
+      if (victim._evictionVersion !== node.version) continue;
       this.unindexEntry(victim);
       this.entries.delete(victim.id);
     }
@@ -504,6 +696,8 @@ class AssociativeMemory {
 
   clear() {
     this.entries.clear();
+    this._evictionHeap = [];
+    this.conceptIndex.clear();
     this.bandMaps.forEach((map) => map.clear());
     this.textMap.clear();
     this.canonicalTextMap.clear();
