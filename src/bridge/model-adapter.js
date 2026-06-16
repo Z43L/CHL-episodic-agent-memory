@@ -354,8 +354,9 @@ class OpenAICompatAdapter {
 
 // Helper functions for Ollama‑compatible shim
 function getModelTags() {
-  // Currently only the CHL episodic memory model is advertised
-  return ['chl-episodic-agent-memory'];
+  // Use the model name from CHL_MODEL (used by `serve:ollama`) or default
+  const tag = process.env.CHL_MODEL || 'chl-episodic-agent-memory';
+  return [tag];
 }
 
 /**

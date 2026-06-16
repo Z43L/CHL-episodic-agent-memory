@@ -14,7 +14,7 @@
     "eval": "node scripts/evaluate.js",
     "serve": "node src/server.js",
     "serve:lazy": "node -e \"require('./src/server').createServer({memory:{lazyLoad:true,maxHydrationEntries:5000}}).listen(3030,'127.0.0.1',()=>console.log('CHL API listening on http://127.0.0.1:3030'))\"",
-    "serve:ollama": "CHL_PROVIDER=ollama CHL_MODEL=kimik-k2.7-code:cloud node src/server.js",
+    "serve:ollama": "CHL_PROVIDER=ollama CHL_MODEL=kimi-k2.7-code:cloud node src/server.js",
     "serve:ollama:lazy": "CHL_PROVIDER=ollama CHL_MODEL=kimik-k2.7-code:cloud node -e \"require('./src/server').createServer({memory:{lazyLoad:true,maxHydrationEntries:5000}}).listen(3030,'127.0.0.1',()=>console.log('CHL API (Ollama) listening on http://127.0.0.1:3030'))\"",
     "serve:mcp": "node src/mcp-server.js",
     "serve:ollama-api": "PORT=${PORT:-33141} node ./ollama_adapter.js"
