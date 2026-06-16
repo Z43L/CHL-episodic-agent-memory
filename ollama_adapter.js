@@ -69,7 +69,19 @@ app.get('/api/version', (req, res) => {
 });
 
 // Tags endpoint – returns list of model tags in Ollama format
-app.get('/api/tags', (req, res) => {
+app.get('/api/tags', async (req, res) => {
+  try {
+    const response = await fetch(`${ollamaBaseUrl}/api/tags`);
+    if (response.ok) {
+      const data = await response.json();
+      console.log(`[Shim] Dynamically detected models from Ollama:`, data.models?.map(m => m.name));
+      return res.json(data);
+    }
+  } catch (err) {
+    console.error(`[Shim] Failed to fetch tags from real Ollama at ${ollamaBaseUrl}:`, err.message);
+  }
+
+  // Fallback if real Ollama is unreachable
   const modelTag = modelName || 'chl-episodic-agent-memory';
   const cleanModelName = modelTag.split(':')[0];
   res.json({
@@ -94,9 +106,23 @@ app.get('/api/tags', (req, res) => {
 });
 
 // Show model details (Ollama show endpoint)
-app.post('/api/show', (req, res) => {
+app.post('/api/show', async (req, res) => {
   const { model } = req.body;
   const targetModel = model || modelName || 'chl-episodic-agent-memory';
+  try {
+    const response = await fetch(`${ollamaBaseUrl}/api/show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: targetModel })
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return res.json(data);
+    }
+  } catch (err) {
+    console.error(`[Shim] Failed to fetch show for model ${targetModel} from real Ollama:`, err.message);
+  }
+
   const cleanModelName = targetModel.split(':')[0];
   res.json({
     license: "",
@@ -158,6 +184,12 @@ app.post('/api/embeddings', (req, res) => {
 app.post('/api/generate', async (req, res) => {
   const { prompt, stream, model } = req.body;
   const respModel = model || modelName || 'chl-episodic-agent-memory';
+  
+  // Set the target model dynamically on the bridge adapter
+  if (model && bridge && bridge.adapter) {
+    bridge.adapter.model = model;
+  }
+  
   if (!prompt) {
     return res.status(400).json({ error: 'Missing prompt' });
   }
@@ -207,6 +239,12 @@ app.post('/api/generate', async (req, res) => {
 app.post('/api/chat', async (req, res) => {
   const { messages, stream, model } = req.body;
   const respModel = model || modelName || 'chl-episodic-agent-memory';
+  
+  // Set the target model dynamically on the bridge adapter
+  if (model && bridge && bridge.adapter) {
+    bridge.adapter.model = model;
+  }
+  
   const userMsg = messages?.slice().reverse().find(m => m.role === 'user');
   const prompt = userMsg?.content || '';
 
