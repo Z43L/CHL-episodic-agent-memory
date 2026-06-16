@@ -60,11 +60,10 @@ class Session {
     // 2. Construir system prompt con memoria inyectada
     const systemMsg = this._buildSystemMessage(memoryContext, userQuery);
 
-    // 3. Añadir mensaje del usuario al historial
-    this.messages.push({ role: "user", content: userQuery });
-    this._trimHistory();
+    // 3. Inicializar mensajes temporales de este turno para soporte de herramientas
+    this.messages = [{ role: "user", content: userQuery }];
 
-    // 4. Llamar al LLM con herramientas CHL
+    // 4. Llamar al LLM con herramientas CHL (sólo system prompt y el query del turno)
     const fullMessages = [systemMsg, ...this.messages];
     let result = await this.adapter.chat(fullMessages);
 
@@ -100,13 +99,21 @@ class Session {
         (result.usage?.output_tokens || result.usage?.completion_tokens || 0);
     }
 
-    // 6. Guardar respuesta final en historial
-    if (result.content) {
-      this.messages.push({ role: "assistant", content: result.content });
-    }
-    this._trimHistory();
-
+    // 6. Guardar turno completo (pregunta + respuesta) como una sola entrada episodica
     const elapsed = Date.now() - startTime;
+    if (this.chl) {
+      try {
+        const episodeText = `User: ${userQuery}\nAssistant: ${result.content || ""}`;
+        this.chl.remember(episodeText, null, { source: "auto-history", turnMs: elapsed });
+        // Persistir lexicon/conceptos sidecar sincronicamente
+        this.chl.saveLexicon?.();
+      } catch (err) {
+        console.error("[CHL] Error in auto-remember:", err);
+      }
+    }
+    
+    // Liberar contexto de chat
+    this.messages = [];
 
     return {
       response: result.content || "",
@@ -118,8 +125,9 @@ class Session {
 
   /**
    * Recupera contexto relevante de CHL para la query.
-   * Normaliza los candidatos para que tengan la forma { entry: { id, text, score } }
-   * que espera navigateSemanticMemory.
+   * Combina:
+   *  - Ultimas entradas de conversacion (memoria reciente)
+   *  - Entradas semanticamente relacionadas con la query
    */
   async _retrieveContext(query) {
     if (!this.chl) return { memories: [], concepts: [], graphEdges: [] };
@@ -127,8 +135,23 @@ class Session {
     try {
       const { navigateSemanticMemory } = require("../neural/chl-semantic-expert");
 
-      // Envolver candidatos de NativeCHL (que son { id, text, score })
-      // en la forma { entry: { id, text, score } } que espera navigateSemanticMemory
+      // 1. Recuperar ultimos mensajes de conversacion (memoria reciente)
+      const recentEntries = this.chl.entries()
+        .filter(e => (e.metadata?.source || e.source) === "auto-history")
+        .slice(-10)
+        .reverse();
+      const recentMemories = recentEntries.map((e, idx) => ({
+        entry: {
+          id: e.id,
+          text: e.text || e.input || "",
+          score: 1.0 - idx * 0.05, // recientes con score alto
+          payload: e.payload,
+          metadata: e.metadata,
+        },
+        score: 1.0 - idx * 0.05,
+      }));
+
+      // Wrapper recall function that returns candidates in the shape expected by navigateSemanticMemory
       const recallFn = async (q, opts = {}) => {
         const result = this.chl.recall(q, { topK: opts.topK || 8 });
         const rawCandidates = result?.candidates || [];
@@ -151,41 +174,73 @@ class Session {
         targetTopK: 10,
       });
 
-      const memories = (navResult.reranked || []).map(r => ({
+      let semanticMemories = (navResult.reranked || []).map(r => ({
         entry: r.entry,
         score: r.score,
       }));
-      this.stats.memoriesRecalled += memories.length;
 
-      // Extraer conceptos del lexicon si está disponible
-      let concepts = [];
-      try {
-        const lexicon = this.chl.lexicon?.() || this.chl.getLexicon?.() || {};
-        concepts = Object.keys(lexicon || {}).slice(0, 20);
-      } catch { /* sin lexicon */ }
-
-      // Extraer grafo si está disponible
-      let graphEdges = [];
-      try {
-        const graph = this.chl.conceptGraph?.() || this.chl.getGraph?.() || {};
-        graphEdges = graph.edges || [];
-      } catch { /* sin grafo */ }
-
-      return { memories, concepts, graphEdges };
-    } catch (err) {
-      // Fallback: recall simple con envolvimiento
-      try {
-        const result = this.chl.recall(query, { topK: 8 });
-        const rawCandidates = result?.candidates || [];
-        const memories = rawCandidates.map(c => ({
+      // Fallback to simple recall if semantic navigation yields no results
+      if (semanticMemories.length === 0) {
+        const simple = this.chl.recall(query, { topK: 8 });
+        const raw = simple?.candidates || [];
+        semanticMemories = raw.map(c => ({
           entry: {
             id: c.id,
             text: c.text,
             score: c.score,
             payload: c.payload,
+            metadata: c.metadata,
           },
           score: c.score,
         }));
+      }
+
+      // Merge: recientes primero, luego semanticas evitando duplicados
+      const seenIds = new Set(recentMemories.map(m => m.entry.id));
+      const memories = [...recentMemories];
+      for (const m of semanticMemories) {
+        if (!seenIds.has(m.entry.id)) {
+          memories.push(m);
+          seenIds.add(m.entry.id);
+        }
+      }
+      this.stats.memoriesRecalled += memories.length;
+
+      // Extract concepts from lexicon if available
+      let concepts = [];
+      try {
+        const lexicon = this.chl.lexicon?.() || this.chl.getLexicon?.() || {};
+        concepts = Object.keys(lexicon || {}).slice(0, 20);
+      } catch { /* no lexicon */ }
+
+      // Extract graph edges if available
+      let graphEdges = [];
+      try {
+        const graph = this.chl.conceptGraph?.() || this.chl.getGraph?.() || {};
+        graphEdges = graph.edges || [];
+      } catch { /* no graph */ }
+
+      return { memories, concepts, graphEdges };
+    } catch (err) {
+      // Final fallback: ultimas entradas + simple recall
+      try {
+        const recentEntries = this.chl.entries()
+          .filter(e => (e.metadata?.source || e.source) === "auto-history")
+          .slice(-5)
+          .reverse();
+        const result = this.chl.recall(query, { topK: 8 });
+        const rawCandidates = result?.candidates || [];
+        const seenIds = new Set(recentEntries.map(e => e.id));
+        const memories = recentEntries.map((e, idx) => ({
+          entry: { id: e.id, text: e.text || e.input || "", score: 1.0 - idx * 0.05, payload: e.payload, metadata: e.metadata },
+          score: 1.0 - idx * 0.05,
+        }));
+        for (const c of rawCandidates) {
+          if (!seenIds.has(c.id)) {
+            memories.push({ entry: { id: c.id, text: c.text, score: c.score, payload: c.payload, metadata: c.metadata }, score: c.score });
+            seenIds.add(c.id);
+          }
+        }
         this.stats.memoriesRecalled += memories.length;
         return { memories, concepts: [], graphEdges: [] };
       } catch {
@@ -193,6 +248,7 @@ class Session {
       }
     }
   }
+
 
   /**
    * Construye el mensaje de sistema con memoria inyectada.

@@ -133,6 +133,55 @@ src/
 
 ---
 
+## Inferencia del Modelo Fine-tuneado, Chat y Persistencia `.memory`
+
+Hemos unificado la base de datos de memoria persistente C++ y el modelo neuronal fine-tuneado (Qwen 3B + LoRA + CHL Layer) para trabajar juntos de forma automática utilizando archivos de base de datos `.memory` (que reemplazan el formato antiguo `.log`).
+
+### 1. Ingesta de Datasets desde Hugging Face
+
+Puedes importar cualquier dataset de Hugging Face directamente dentro de un archivo de base de datos `.memory` usando el script unificado de ingesta:
+
+```bash
+# Ingerir las primeras 100 filas del dataset wikitext
+npm run ingest:hf -- --dataset wikitext --config wikitext-2-raw-v1 --limit 100
+
+# Ingerir un dataset personalizado indicando la columna de texto y el archivo .memory
+npm run ingest:hf -- --dataset username/dataset-name --text-column content --memory mis-datos.memory --limit 500
+```
+
+*Nota: Todas las demás columnas del dataset se guardan automáticamente dentro de los metadatos y payload de cada memoria para preservar el contexto original.*
+
+### 2. Chat Interactivo Unificado
+
+El comando `chat:unified` lanza una consola de chat que conecta la base de datos `.memory` local con la inferencia de tu modelo neuronal fine-tuneado:
+
+```bash
+# Usando la memoria por defecto (chl-memory.memory)
+npm run chat:unified
+
+# Usando una memoria específica
+npm run chat:unified -- --memory ./mis-datos.memory
+```
+
+* **Autodetección del Backend:** El script detecta automáticamente si el servidor del modelo en Python (`serve_model.py`) está activo. Si no, lo levanta automáticamente en segundo plano en el puerto `3040` y espera a que responda antes de iniciar.
+* **Comandos en Chat:**
+  - `/remember <hecho>` — Guarda un hecho en tiempo real en el archivo `.memory`.
+  - `/recall <consulta>` — Busca similitudes en la base de datos.
+  - `/state` — Imprime el número de memorias y estadísticas.
+  - `/clear` — Limpia el contexto de la conversación.
+  - `/exit` — Cierra la sesión de forma limpia.
+
+### 3. Servidor de API Gateway Compatible con OpenAI
+
+Puedes exponer tu base de datos `.memory` y el modelo neuronal a través de un endpoint compatible con la API de OpenAI (completions de chat) para conectarlo a herramientas externas (como Codex o Claude Code):
+
+```bash
+# Servir en el puerto 3050 usando una memoria específica
+npm run chat:unified -- --serve --port 3050 --memory ./produccion.memory
+```
+
+---
+
 ## Instalación rápida
 
 ```bash
@@ -142,3 +191,4 @@ bash scripts/install.sh
 ```
 
 Guía detallada: [INSTALL.md](/Users/davidmoreno/Desktop/CHL-episodic-agent-memory/INSTALL.md)
+

@@ -518,18 +518,43 @@ async function callTool(context, name, args) {
       };
       break;
     }
-    case "chl_ask":
-    case "chl_plan":
-    case "chl_verify":
+    case "chl_ask": {
+      if (typeof mem.ask === "function") {
+        result = mem.ask(args.query ?? "", { topK: args.topK ?? 5 });
+      } else {
+        const recall = mem.recall(args.query ?? "", { topK: args.topK ?? 5 });
+        result = {
+          candidates: (recall.candidates ?? []).map(c => ({
+            text: c.text ?? c.entry?.text,
+            score: c.score,
+          })),
+          confidence: recall.confidence,
+        };
+      }
+      break;
+    }
+    case "chl_plan": {
+      if (typeof mem.plan === "function") {
+        result = mem.plan(args.query ?? "", { topK: args.topK ?? 5 });
+      } else {
+        result = { error: "plan not available" };
+      }
+      break;
+    }
+    case "chl_verify": {
+      if (typeof mem.verify === "function") {
+        result = mem.verify(args.plan ?? args.query ?? "", { topK: args.topK ?? 5 });
+      } else {
+        result = { error: "verify not available" };
+      }
+      break;
+    }
     case "chl_learn_from_verification": {
-      const recall = mem.recall(args.query ?? args.plan, { topK: args.topK ?? 5 });
-      result = {
-        candidates: (recall.candidates ?? []).map(c => ({
-          text: c.text ?? c.entry?.text,
-          score: c.score,
-        })),
-        confidence: recall.confidence,
-      };
+      if (typeof mem.learnFromVerification === "function") {
+        result = mem.learnFromVerification(args.verification ?? args);
+      } else {
+        result = { error: "learnFromVerification not available" };
+      }
       break;
     }
     case "chl_consolidate": {
@@ -549,24 +574,38 @@ async function callTool(context, name, args) {
     case "chl_backup_memory": {
       if (!args.backupPath) throw new Error("chl_backup_memory requires backupPath");
       if (typeof mem.backupMemory !== "function") throw new Error("backupMemory not available");
-      mem.saveMemory(args.backupPath);
-      result = { ok: true, backupPath: args.backupPath };
+      const saveRes = mem.saveMemory(args.backupPath);
+      result = typeof saveRes === "object" && saveRes !== null ? saveRes : { ok: true, path: args.backupPath };
+      result.backupPath = args.backupPath;
       break;
     }
     case "chl_lexicon": {
-      const lex = mem.lexicon?.() ?? { conceptPairs: 0, prototypeCount: 0, phraseCount: 0 };
+      const lex = mem.lexicon?.() ?? { concepts: [], phrases: [] };
       result = {
-        conceptPairs: lex.conceptPairs ?? lex.concepts?.length ?? 0,
+        ...lex,
+        counts: {
+          concepts: lex.concepts?.length ?? 0,
+          phrases: lex.phrases?.length ?? 0,
+        },
+        sources: {
+          conceptsPath: mem.conceptsPath ?? null,
+          phrasesPath: mem.phrasesPath ?? null,
+        },
+        conceptPairs: lex.concepts?.length ?? 0,
         prototypeCount: lex.prototypeCount ?? 0,
-        phraseCount: lex.phraseCount ?? lex.phrases?.length ?? 0,
+        phraseCount: lex.phrases?.length ?? 0,
         trainer: lex.trainer ?? null,
       };
       break;
     }
     case "chl_lexicon_export": {
-      const l = mem.lexicon?.() ?? { conceptPairs: 0, prototypeCount: 0, phraseCount: 0 };
+      const l = mem.lexicon?.() ?? { concepts: [], phrases: [] };
       result = {
-        ...l,
+        format: "chl-lexicon-tsv-v1",
+        export: {
+          conceptsTsv: serializePairList(l.concepts || []),
+          phrasesTsv: serializePairList(l.phrases || []),
+        },
         trainerSnapshot: l.trainer ?? null,
       };
       break;
@@ -574,7 +613,7 @@ async function callTool(context, name, args) {
     case "chl_restore_memory": {
       if (!args.backupPath) throw new Error("chl_restore_memory requires backupPath");
       if (typeof mem.restoreMemory !== "function") throw new Error("restoreMemory not available");
-      mem.loadMemory(args.backupPath);
+      mem.loadMemory(args.backupPath, { replace: args.replace ?? true });
       result = { ok: true, restoredFrom: args.backupPath };
       break;
     }
@@ -588,7 +627,8 @@ async function callTool(context, name, args) {
       break;
     }
     case "chl_profile": {
-      result = mem.profile?.() ?? { profile: "default" };
+      const p = mem.profile?.();
+      result = typeof p === "object" && p !== null ? p : { profile: p ?? "default" };
       break;
     }
     case "chl_state": {
@@ -733,7 +773,7 @@ async function callTool(context, name, args) {
   }
 
   // ─── Auto-memory hook ──────────────────────────────────
-  if (context.autoRemember?.enabled && result) {
+  if (context.autoRemember?.enabled && result && !name.startsWith("chl_")) {
     try {
       const evalResult = evaluateInteraction(
         {
@@ -808,7 +848,7 @@ function listResources(context) {
   };
 }
 
-function readResource(context, uri) {
+async function readResource(context, uri) {
   if (!context.memory) throw new Error("Memory not initialized");
   switch (uri) {
     case "chl://memory":
@@ -816,6 +856,7 @@ function readResource(context, uri) {
         contents: [{
           uri, mimeType: "application/json",
           text: JSON.stringify({
+            entries: context.memory.entries?.() ?? [],
             entryCount: context.memory.entries?.()?.length ?? 0,
             journalLength: context.memory.journal?.()?.length ?? 0,
             episodesCount: context.memory.episodes?.()?.length ?? 0,
@@ -823,13 +864,16 @@ function readResource(context, uri) {
           }, null, 2),
         }],
       };
-    case "chl://profile":
+    case "chl://profile": {
+      const p = context.memory.profile?.();
+      const pObj = typeof p === "object" && p !== null ? p : { profile: p ?? "default" };
       return {
         contents: [{
           uri, mimeType: "application/json",
-          text: JSON.stringify(context.memory.profile?.() ?? {}, null, 2),
+          text: JSON.stringify(pObj, null, 2),
         }],
       };
+    }
     case "chl://state":
       return {
         contents: [{

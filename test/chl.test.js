@@ -677,6 +677,7 @@ test("MCP exposes the learned lexicon for inspection and export", async () => {
 
 test("MCP exposes episode consolidation", async () => {
   const context = createMcpContext({
+    frontier: true,
     memory: { bitCount: 128, hyperDim: 256 },
   });
 

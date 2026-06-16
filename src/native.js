@@ -74,6 +74,10 @@ class NativeCHL {
     this.autoConsolidationMinConfidence = clamp(Number(this.options.autoConsolidationMinConfidence ?? 0.65) || 0, 0, 1);
     this.autoConsolidationMinSupport = Math.max(1, Math.floor(Number(this.options.autoConsolidationMinSupport ?? 2) || 2));
     this._autoConsolidationPending = false;
+    this._shardSizeBytes = Number(this.options.shardSize ?? 1024 * 1024 * 10);
+    this._hydratedShardIndex = 0;
+    this._lazyLoad = Boolean(this.options.lazyLoad);
+    this._maxHydrationEntries = Number.isFinite(this.options.maxHydrationEntries) ? this.options.maxHydrationEntries : Infinity;
     this._autoConsolidationStats = {
       scheduled: 0,
       completed: 0,
@@ -98,9 +102,17 @@ class NativeCHL {
       this.fallback = new CHL(this.options);
     }
     this._ensurePersistDir();
-    this._ready = this._hydrateFromDiskAsync().catch((error) => {
-      this._readyError = error;
-    });
+this._ready = this._loadOrCreateIndex()
+  .then(() => {
+    if (this._lazyLoad) {
+      return this._hydrateFromDiskAsync(this._maxHydrationEntries);
+    } else {
+      return this._hydrateFromDiskAsync();
+    }
+  })
+  .catch((error) => {
+    this._readyError = error;
+  });
   }
 
   _ensurePersistDir() {
@@ -126,6 +138,43 @@ class NativeCHL {
     return path.join(parsed.dir, `${parsed.name}${suffix}`);
   }
 
+  async _loadOrCreateIndex() {
+    this._shardOffsets = this._calculateShardOffsets();
+  }
+
+  _calculateShardOffsets() {
+    if (!this.persistPath || !fs.existsSync(this.persistPath)) return [0];
+    const stats = fs.statSync(this.persistPath);
+    const totalSize = stats.size;
+    const shardSize = this._shardSizeBytes;
+    const offsets = [0];
+    if (totalSize <= shardSize) return offsets;
+
+    const fd = fs.openSync(this.persistPath, "r");
+    try {
+      let currentPos = shardSize;
+      const buffer = Buffer.alloc(1024 * 4);
+      while (currentPos < totalSize) {
+        const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, currentPos);
+        const newlineIdx = buffer.indexOf(10, 0, bytesRead);
+        if (newlineIdx !== -1) {
+          const offset = currentPos + newlineIdx + 1;
+          if (offset < totalSize) {
+            offsets.push(offset);
+            currentPos = offset + shardSize;
+          } else {
+            break;
+          }
+        } else {
+          currentPos += buffer.length;
+        }
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    return offsets;
+  }
+
   _syncLexiconEnv() {
     if (this.conceptsPath) {
       process.env.CHL_CONCEPTS_PATH = this.conceptsPath;
@@ -149,34 +198,71 @@ class NativeCHL {
     });
   }
 
-  async _hydrateFromDiskAsync() {
+  async _hydrateFromDiskAsync(limit = Infinity) {
     if (!this.persistPath || !fs.existsSync(this.persistPath)) return;
     this._hydrating = true;
     try {
-      const stream = fs.createReadStream(this.persistPath, { encoding: "utf8" });
-      const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
-      try {
-        for await (const line of reader) {
-          if (!line.trim()) continue;
-          const event = JSON.parse(line);
-          this._journal.push(event);
-          if (event.type === "remember") {
-            this.remember(event.text, event.payload, event.metadata);
-          } else if (event.type === "learn") {
-            this.learn(event.text, event.reward);
-          } else if (event.type === "episode" && event.episode) {
-            this._decisionEpisodes.push(event.episode);
-          } else if (event.type === "consolidation" && Number.isFinite(event.nextEpisodeIndex)) {
-            this._lastConsolidatedEpisodeIndex = Math.max(this._lastConsolidatedEpisodeIndex, event.nextEpisodeIndex);
+      let totalCount = 0;
+      while (this._hydratedShardIndex < this._shardOffsets.length && totalCount < limit) {
+        const i = this._hydratedShardIndex;
+        const start = this._shardOffsets[i];
+        const end = i + 1 < this._shardOffsets.length ? this._shardOffsets[i + 1] - 1 : undefined;
+        const stream = fs.createReadStream(this.persistPath, {
+          encoding: "utf8",
+          start,
+          end,
+        });
+        const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
+        let batch = [];
+        const batchSize = 500;
+        try {
+          for await (const line of reader) {
+            if (!line.trim()) continue;
+            try {
+              const event = JSON.parse(line);
+              this._journal.push(event);
+              if (event.type === "remember") {
+                batch.push(event);
+                if (batch.length >= batchSize) {
+                  for (const ev of batch) {
+                    this.remember(ev.text, ev.payload, ev.metadata);
+                  }
+                  totalCount += batch.length;
+                  batch = [];
+                  if (totalCount >= limit) break;
+                  await new Promise((r) => setImmediate(r));
+                }
+              } else if (event.type === "learn") {
+                this.learn(event.text, event.reward);
+              } else if (event.type === "episode" && event.episode) {
+                this._decisionEpisodes.push(event.episode);
+              } else if (event.type === "consolidation" && Number.isFinite(event.nextEpisodeIndex)) {
+                this._lastConsolidatedEpisodeIndex = Math.max(this._lastConsolidatedEpisodeIndex, event.nextEpisodeIndex);
+              }
+            } catch (parseErr) {
+              // ignore malformed lines
+            }
           }
+          for (const ev of batch) {
+            this.remember(ev.text, ev.payload, ev.metadata);
+          }
+          totalCount += batch.length;
+        } finally {
+          reader.close();
+          stream.destroy();
         }
-      } finally {
-        reader.close();
-        stream.destroy();
+        this._hydratedShardIndex++;
+      }
+      if (totalCount > 0) {
+        console.log(`[CHL] Memoria hidratada: ${totalCount} entradas desde ${this.persistPath}`);
       }
     } finally {
       this._hydrating = false;
     }
+  }
+
+  async loadRemainingShards() {
+    return this._hydrateFromDiskAsync(Infinity);
   }
 
   whenReady() {

@@ -9,6 +9,10 @@
 #include <thread>
 #include <unordered_set>
 
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
+
 namespace hyperembed {
 
 // ─── Vector operations ─────────────────────────────────────
@@ -119,21 +123,64 @@ void vec_permute(const Vector& src, int shift, Vector& result) {
 
 double vec_similarity(const Vector& a, const Vector& b) {
   uint32_t mismatches = 0;
-  for (size_t i = 0; i < VEC_WORDS; ++i) {
-    uint32_t diff = (a[i] ^ b[i]);
-    if (i == VEC_WORDS - 1) diff &= LAST_WORD_MASK;
-    mismatches += __builtin_popcount(diff);
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+  uint32x4_t mismatch_cnt = vdupq_n_u32(0);
+  for (size_t i = 0; i < 312; i += 4) {
+    uint32x4_t va = vld1q_u32(&a[i]);
+    uint32x4_t vb = vld1q_u32(&b[i]);
+    uint32x4_t diff = veorq_u32(va, vb);
+    uint8x16_t cnt8 = vcntq_u8(vreinterpretq_u8_u32(diff));
+    uint16x8_t cnt16 = vpaddlq_u8(cnt8);
+    uint32x4_t cnt32 = vpaddlq_u16(cnt16);
+    mismatch_cnt = vaddq_u32(mismatch_cnt, cnt32);
   }
+#if defined(__aarch64__)
+  mismatches += vaddvq_u32(mismatch_cnt);
+#else
+  uint32_t lanes[4];
+  vst1q_u32(lanes, mismatch_cnt);
+  mismatches += lanes[0] + lanes[1] + lanes[2] + lanes[3];
+#endif
+#else
+  const uint64_t* ptr_a = reinterpret_cast<const uint64_t*>(a.data());
+  const uint64_t* ptr_b = reinterpret_cast<const uint64_t*>(b.data());
+  for (size_t i = 0; i < 156; ++i) {
+    mismatches += __builtin_popcountll(ptr_a[i] ^ ptr_b[i]);
+  }
+#endif
+
+  uint32_t tail_diff = (a[312] ^ b[312]) & LAST_WORD_MASK;
+  mismatches += __builtin_popcount(tail_diff);
+
   return (DIM - 2.0 * mismatches) / DIM;
 }
 
 uint32_t vec_popcount(const Vector& v) {
   uint32_t total = 0;
-  for (size_t i = 0; i < VEC_WORDS; ++i) {
-    uint32_t word = v[i];
-    if (i == VEC_WORDS - 1) word &= LAST_WORD_MASK;
-    total += __builtin_popcount(word);
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+  uint32x4_t total_cnt = vdupq_n_u32(0);
+  for (size_t i = 0; i < 312; i += 4) {
+    uint32x4_t val = vld1q_u32(&v[i]);
+    uint8x16_t cnt8 = vcntq_u8(vreinterpretq_u8_u32(val));
+    uint16x8_t cnt16 = vpaddlq_u8(cnt8);
+    uint32x4_t cnt32 = vpaddlq_u16(cnt16);
+    total_cnt = vaddq_u32(total_cnt, cnt32);
   }
+#if defined(__aarch64__)
+  total += vaddvq_u32(total_cnt);
+#else
+  uint32_t lanes[4];
+  vst1q_u32(lanes, total_cnt);
+  total += lanes[0] + lanes[1] + lanes[2] + lanes[3];
+#endif
+#else
+  const uint64_t* ptr_v = reinterpret_cast<const uint64_t*>(v.data());
+  for (size_t i = 0; i < 156; ++i) {
+    total += __builtin_popcountll(ptr_v[i]);
+  }
+#endif
+
+  total += __builtin_popcount(v[312] & LAST_WORD_MASK);
   return total;
 }
 

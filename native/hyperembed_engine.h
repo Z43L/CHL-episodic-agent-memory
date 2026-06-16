@@ -14,7 +14,7 @@ namespace hyperembed {
 
 constexpr size_t DIM = 10000;
 constexpr size_t WORD_SIZE = 32;
-constexpr size_t VEC_WORDS = (DIM + WORD_SIZE - 1) / WORD_SIZE; // 313
+constexpr size_t VEC_WORDS = 320; // Padded to 320 words for 64-byte alignment
 constexpr size_t TAIL_BITS = DIM % WORD_SIZE; // 16
 constexpr uint32_t LAST_WORD_MASK = TAIL_BITS == 0 ? 0xFFFFFFFFu : ((1u << TAIL_BITS) - 1u);
 constexpr double LEARNING_RATE = 0.05;
@@ -24,7 +24,15 @@ constexpr size_t UPDATE_WINDOW = 6;
 constexpr size_t NEGATIVE_SAMPLES = 2;
 constexpr double SUBSAMPLE_T = 1e-4;
 
-using Vector = std::array<uint32_t, VEC_WORDS>;
+struct alignas(64) Vector {
+  std::array<uint32_t, VEC_WORDS> arr;
+
+  inline uint32_t& operator[](size_t idx) { return arr[idx]; }
+  inline const uint32_t& operator[](size_t idx) const { return arr[idx]; }
+  inline uint32_t* data() { return arr.data(); }
+  inline const uint32_t* data() const { return arr.data(); }
+  inline size_t size() const { return VEC_WORDS; }
+};
 
 // ─── Vector operations ─────────────────────────────────────
 

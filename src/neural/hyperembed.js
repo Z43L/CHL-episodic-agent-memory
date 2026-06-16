@@ -28,7 +28,7 @@ const { stableHash32, tokenize, normalizeText } = require("../utils");
 
 const DIM = 10000;
 const WORD_SIZE = 32;
-const VEC_WORDS = Math.ceil(DIM / WORD_SIZE); // 313 words para 10000 bits
+const VEC_WORDS = 320; // Padded to 320 words to align with native SIMD memory structure
 const BUNDLE_THRESHOLD = 0.5; // Para bundling: mayoría simple
 const LEARNING_RATE = 0.05;   // Tasa de adaptación de vectores dinámicos
 

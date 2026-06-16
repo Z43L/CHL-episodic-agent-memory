@@ -169,6 +169,30 @@ static const std::vector<std::pair<std::string, std::string>>& canonical_phrase_
   return kMap;
 }
 
+static const std::vector<std::pair<std::string, std::string>>& extra_phrase_map() {
+  static const std::vector<std::pair<std::string, std::string>> kMap = []() {
+    std::vector<std::pair<std::string, std::string>> map;
+    const char* extra_path = std::getenv("CHL_PHRASES_PATH");
+    if (extra_path && *extra_path) {
+      std::ifstream in(extra_path);
+      if (in.good()) {
+        std::string line;
+        while (std::getline(in, line)) {
+          if (line.empty()) continue;
+          const size_t tab = line.find('\t');
+          if (tab == std::string::npos) continue;
+          std::string from = to_lower_ascii(line.substr(0, tab));
+          std::string to = to_lower_ascii(line.substr(tab + 1));
+          if (from.empty() || to.empty()) continue;
+          map.emplace_back(from, to);
+        }
+      }
+    }
+    return map;
+  }();
+  return kMap;
+}
+
 static std::string canonicalize_text(std::string text) {
   text = to_lower_ascii(text);
   for (const auto& pair : canonical_phrase_map()) {
@@ -185,28 +209,17 @@ static std::string canonicalize_text(std::string text) {
       }
     }
   }
-  const char* extra_path = std::getenv("CHL_PHRASES_PATH");
-  if (extra_path && *extra_path) {
-    std::ifstream in(extra_path);
-    std::string line;
-    while (std::getline(in, line)) {
-      if (line.empty()) continue;
-      const size_t tab = line.find('\t');
-      if (tab == std::string::npos) continue;
-      std::string from = to_lower_ascii(line.substr(0, tab));
-      std::string to = to_lower_ascii(line.substr(tab + 1));
-      if (from.empty() || to.empty()) continue;
-      size_t pos = 0;
-      while ((pos = text.find(from, pos)) != std::string::npos) {
-        const bool left_ok = pos == 0 || text[pos - 1] == ' ';
-        const size_t end = pos + from.size();
-        const bool right_ok = end >= text.size() || text[end] == ' ';
-        if (left_ok && right_ok) {
-          text.replace(pos, from.size(), to);
-          pos += to.size();
-        } else {
-          pos = end;
-        }
+  for (const auto& pair : extra_phrase_map()) {
+    size_t pos = 0;
+    while ((pos = text.find(pair.first, pos)) != std::string::npos) {
+      const bool left_ok = pos == 0 || text[pos - 1] == ' ';
+      const size_t end = pos + pair.first.size();
+      const bool right_ok = end >= text.size() || text[end] == ' ';
+      if (left_ok && right_ok) {
+        text.replace(pos, pair.first.size(), pair.second);
+        pos += pair.second.size();
+      } else {
+        pos = end;
       }
     }
   }

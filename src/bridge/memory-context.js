@@ -154,6 +154,7 @@ function buildMemoryContext(opts = {}) {
 
   for (const { entry, score } of deduped) {
     const text = String(entry.text || entry.input || "").trim();
+    if (!text) continue;
     const payload = entry.payload
       ? (typeof entry.payload === "string" ? entry.payload : JSON.stringify(entry.payload))
       : null;
@@ -162,13 +163,13 @@ function buildMemoryContext(opts = {}) {
       : null;
 
     let line = text;
-    if (payload && payload !== text) line += ` [${payload}]`;
-    if (metadata) line += ` (meta: ${metadata.slice(0, 120)})`;
+    if (payload && payload !== text && String(payload).length < 200) line += ` [${payload}]`;
+    if (metadata && String(metadata).length < 120) line += ` (meta: ${metadata})`;
 
     const lineTokens = estimateTokens(line);
     if (memTokens + lineTokens > memBudget) break;
 
-    const scoreLabel = score >= 0.8 ? "★★★" : score >= 0.6 ? "★★" : score >= 0.4 ? "★" : "·";
+    const scoreLabel = score >= 0.95 ? "●" : score >= 0.8 ? "★★★" : score >= 0.6 ? "★★" : score >= 0.4 ? "★" : "·";
     memoryLines.push(`${scoreLabel} ${line}`);
     memTokens += lineTokens;
   }

@@ -39,3 +39,53 @@ if (result.status !== 0) {
 }
 
 console.log(`built ${outFile}`);
+
+// Compile llama_chl_bridge.cc if llama.cpp headers exist
+const llamaCppDir = path.join(root, "llama.cpp");
+if (fs.existsSync(path.join(llamaCppDir, "include", "llama.h"))) {
+  console.log("Compiling GGML llama_chl_bridge.cc...");
+  const bridgeSource = path.join(root, "native", "llama_chl_bridge.cc");
+  const bridgeOut = path.join(outDir, "llama_chl_bridge.o");
+  const bridgeArgs = [
+    "-std=c++20",
+    "-O3",
+    "-fPIC",
+    "-c",
+    bridgeSource,
+    `-I${path.join(llamaCppDir, "include")}`,
+    `-I${path.join(llamaCppDir, "ggml", "include")}`,
+    "-o",
+    bridgeOut
+  ];
+  
+  const bridgeResult = spawnSync(compiler, bridgeArgs, { stdio: "inherit" });
+  if (bridgeResult.status === 0) {
+    console.log(`✅ successfully compiled llama_chl_bridge.cc to ${bridgeOut}`);
+    
+    // Also build the shared library (dylib on macOS)
+    const bridgeSharedLib = path.join(outDir, "libllama_chl.dylib");
+    const linkArgs = [
+      "-std=c++20",
+      "-O3",
+      "-fPIC",
+      "-shared",
+      bridgeSource,
+      path.join(root, "native", "hyperembed_engine.cc"),
+      `-I${path.join(llamaCppDir, "include")}`,
+      `-I${path.join(llamaCppDir, "ggml", "include")}`,
+      "-o",
+      bridgeSharedLib,
+      "-undefined",
+      "dynamic_lookup"
+    ];
+    const linkResult = spawnSync(compiler, linkArgs, { stdio: "inherit" });
+    if (linkResult.status === 0) {
+      console.log(`✅ successfully linked libllama_chl.dylib to ${bridgeSharedLib}`);
+    } else {
+      console.warn("⚠️ warning: failed to link libllama_chl.dylib");
+    }
+  } else {
+    console.warn("⚠️ warning: failed to compile llama_chl_bridge.cc");
+  }
+}
+
