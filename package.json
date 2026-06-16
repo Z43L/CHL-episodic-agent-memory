@@ -17,10 +17,13 @@
     "serve:ollama": "CHL_PROVIDER=ollama CHL_MODEL=kimi-k2.7-code:cloud node src/server.js",
     "serve:ollama:lazy": "CHL_PROVIDER=ollama CHL_MODEL=kimik-k2.7-code:cloud node -e \"require('./src/server').createServer({memory:{lazyLoad:true,maxHydrationEntries:5000}}).listen(3030,'127.0.0.1',()=>console.log('CHL API (Ollama) listening on http://127.0.0.1:3030'))\"",
     "serve:mcp": "node src/mcp-server.js",
-    "serve:ollama-api": "PORT=${PORT:-33141} node ./ollama_adapter.js"
+    "serve:ollama-api": "PORT=${PORT:-33141} node ./ollama_adapter.js",
+    "serve:ollama-adapter": "node ollama_adapter.js",
+    "serve:ollama-adapter:network": "PORT=11434 OLLAMA_BASE_URL=http://localhost:11435 node ollama_adapter.js"
   },
   "dependencies": {
     "body-parser": "^2.3.0",
+    "cors": "^2.8.6",
     "express": "^5.2.1"
   }
 }

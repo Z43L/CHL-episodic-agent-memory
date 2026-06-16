@@ -68,20 +68,15 @@ function createFramedReader(onMessage, input = stdin) {
     buffer = Buffer.concat([buffer, chunk]);
 
     while (true) {
-      // Fallback mode: some clients send plain JSON-RPC objects without
-      // Content-Length framing. If the current buffer is parseable JSON,
-      // consume it and continue.
-      if (/^\s*Content-Length:/i.test(buffer.toString("utf8"))) {
-        break;
-      }
+      if (!/^\s*Content-Length:/i.test(buffer.toString("utf8"))) {
+        dispatchJsonLines();
 
-      dispatchJsonLines();
-
-      const asText = buffer.toString("utf8").trim();
-      if (asText.startsWith("{") && asText.endsWith("}")) {
-        if (parseAndDispatchJson(asText)) {
-          buffer = Buffer.alloc(0);
-          continue;
+        const asText = buffer.toString("utf8").trim();
+        if (asText.startsWith("{") && asText.endsWith("}")) {
+          if (parseAndDispatchJson(asText)) {
+            buffer = Buffer.alloc(0);
+            continue;
+          }
         }
       }
 

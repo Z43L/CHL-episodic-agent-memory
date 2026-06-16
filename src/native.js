@@ -103,7 +103,34 @@ class NativeCHL {
     }
     this._ensurePersistDir();
 this._ready = this._loadOrCreateIndex()
-  .then(() => {
+  .then(async () => {
+    if (this.persistPath && this.persistPath.endsWith(".memory")) {
+      if (fs.existsSync(this.persistPath)) {
+        try {
+          console.log(`[CHL] Loading binary memory from ${this.persistPath}...`);
+          this.loadMemory(this.persistPath, { replace: true });
+        } catch (err) {
+          console.error(`[CHL] Failed to load binary memory archive:`, err);
+        }
+      }
+      // Load WAL sidecar if exists
+      const walPath = this.persistPath + ".wal";
+      if (fs.existsSync(walPath)) {
+        console.log(`[CHL] Loading WAL events from ${walPath}...`);
+        const originalPath = this.persistPath;
+        this.persistPath = walPath;
+        try {
+          this._shardOffsets = this._calculateShardOffsets();
+          this._hydratedShardIndex = 0;
+          await this._hydrateFromDiskAsync();
+        } finally {
+          this.persistPath = originalPath;
+          this._shardOffsets = this._calculateShardOffsets();
+        }
+      }
+      return;
+    }
+
     if (this._lazyLoad) {
       return this._hydrateFromDiskAsync(this._maxHydrationEntries);
     } else {
@@ -282,11 +309,27 @@ this._ready = this._loadOrCreateIndex()
       this._lastConsolidatedEpisodeIndex = Math.max(this._lastConsolidatedEpisodeIndex, event.nextEpisodeIndex);
     }
     if (!this.persistPath || this._hydrating) return;
+    if (this.persistPath.endsWith(".memory")) {
+      fs.appendFileSync(this.persistPath + ".wal", `${JSON.stringify(event)}\n`);
+      return;
+    }
     fs.appendFileSync(this.persistPath, `${JSON.stringify(event)}\n`);
   }
 
   _replacePersistFile(events) {
     if (!this.persistPath) return;
+    if (this.persistPath.endsWith(".memory")) {
+      try {
+        writeMemoryArchive(this.persistPath, this.backup());
+        const walPath = this.persistPath + ".wal";
+        if (fs.existsSync(walPath)) {
+          fs.unlinkSync(walPath);
+        }
+      } catch (e) {
+        console.error("[CHL] Failed to write binary memory archive:", e);
+      }
+      return;
+    }
     const serialized = events.map((event) => JSON.stringify(event)).join("\n");
     fs.writeFileSync(this.persistPath, serialized ? `${serialized}\n` : "");
   }
@@ -779,6 +822,12 @@ this._ready = this._loadOrCreateIndex()
   loadMemory(filePath, options = {}) {
     const backup = readMemoryArchive(filePath);
     return this.restore(backup, options);
+  }
+
+  async close() {
+    if (this.persistPath && this.persistPath.endsWith(".memory")) {
+      this._replacePersistFile(this._journal);
+    }
   }
 
   saveLexicon() {

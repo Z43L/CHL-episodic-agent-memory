@@ -15,44 +15,62 @@ function sendMessage(proc, msg) {
   proc.stdin.write(frame);
 }
 
-function readMessage(proc, timeoutMs = 10000) {
-  return new Promise((resolve, reject) => {
-    let buffer = "";
-    let contentLength = null;
-    const timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+const procReaderMap = new Map();
 
-    const onData = (data) => {
-      buffer += data.toString();
-      
-      while (true) {
-        if (contentLength === null) {
-          const headerEnd = buffer.indexOf("\r\n\r\n");
-          if (headerEnd === -1) return;
-          const header = buffer.slice(0, headerEnd);
-          const match = header.match(/Content-Length: (\d+)/);
-          if (!match) {
-            buffer = buffer.slice(headerEnd + 4);
-            continue;
-          }
-          contentLength = parseInt(match[1]);
-          buffer = buffer.slice(headerEnd + 4);
-        }
-
-        if (buffer.length >= contentLength) {
-          const body = buffer.slice(0, contentLength);
-          buffer = buffer.slice(contentLength);
-          contentLength = null;
-          proc.stdout.removeListener("data", onData);
-          clearTimeout(timer);
-          resolve(JSON.parse(body));
-          return;
-        }
-        return;
-      }
+function readMessage(proc, timeoutMs = 60000) {
+  let reader = procReaderMap.get(proc);
+  if (!reader) {
+    reader = {
+      buffer: "",
+      queue: [],
+      contentLength: null,
     };
+    proc.stdout.on("data", (data) => {
+      reader.buffer += data.toString();
+      processQueue(reader);
+    });
+    procReaderMap.set(proc, reader);
+  }
 
-    proc.stdout.on("data", onData);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const idx = reader.queue.findIndex(q => q.resolve === resolve);
+      if (idx !== -1) reader.queue.splice(idx, 1);
+      reject(new Error("timeout"));
+    }, timeoutMs);
+
+    reader.queue.push({ resolve, reject, timer });
+    processQueue(reader);
   });
+}
+
+function processQueue(reader) {
+  while (reader.queue.length > 0) {
+    if (reader.contentLength === null) {
+      const headerEnd = reader.buffer.indexOf("\r\n\r\n");
+      if (headerEnd === -1) return;
+      const header = reader.buffer.slice(0, headerEnd);
+      const match = header.match(/Content-Length: (\d+)/);
+      if (!match) {
+        reader.buffer = reader.buffer.slice(headerEnd + 4);
+        continue;
+      }
+      reader.contentLength = parseInt(match[1]);
+      reader.buffer = reader.buffer.slice(headerEnd + 4);
+    }
+
+    if (reader.buffer.length >= reader.contentLength) {
+      const body = reader.buffer.slice(0, reader.contentLength);
+      reader.buffer = reader.buffer.slice(reader.contentLength);
+      reader.contentLength = null;
+
+      const { resolve, timer } = reader.queue.shift();
+      clearTimeout(timer);
+      resolve(JSON.parse(body));
+    } else {
+      break;
+    }
+  }
 }
 
 async function main() {
