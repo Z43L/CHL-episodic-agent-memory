@@ -363,14 +363,12 @@ function getModelTags() {
  * Expects a payload with at least { model, prompt }.
  */
 async function handleOllamaGenerate(body) {
-  const { model, prompt, stream } = body;
+  const { model, prompt } = body;
   // Import bridge lazily to avoid circular dependency issues
   const { createBridge } = require('./bridge');
   const bridge = createBridge({ provider: 'ollama', model });
   const result = await bridge.turn(prompt);
   await bridge.close();
-  const { model, prompt, stream } = body;
-  // Use quickTurn which creates a bridge on‑the‑fly with the requested model.
   
   return {
     model: model || 'chl-episodic-agent-memory',
@@ -393,10 +391,6 @@ async function handleOllamaChat(body) {
   const bridge = createBridge({ provider: 'ollama', model });
   const result = await bridge.turn(prompt);
   await bridge.close();
-  const { model, messages } = body;
-  // Find the most recent user message (Ollama expects a single prompt).
-  const userMsg = messages?.reverse().find(m => m.role === 'user');
-  const prompt = userMsg?.content || '';
   
   return {
     model: model || 'chl-episodic-agent-memory',
