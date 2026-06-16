@@ -17,15 +17,6 @@
     "serve:ollama": "CHL_PROVIDER=ollama CHL_MODEL=kimik-k2.7-code:cloud node src/server.js",
     "serve:ollama:lazy": "CHL_PROVIDER=ollama CHL_MODEL=kimik-k2.7-code:cloud node -e \"require('./src/server').createServer({memory:{lazyLoad:true,maxHydrationEntries:5000}}).listen(3030,'127.0.0.1',()=>console.log('CHL API (Ollama) listening on http://127.0.0.1:3030'))\"",
     "serve:mcp": "node src/mcp-server.js",
-    "bootstrap:chl:memory": "node scripts/bootstrap-chl-memory-from-jsonl.js",
-    "ingest:dir:chl": "node scripts/ingest-directory-into-chl.js",
-    "chat:tui": "node scripts/chat-tui.js",
-    "bridge:openai": "node -e \"const {createBridge}=require('./src/bridge/bridge');const b=createBridge({provider:'openai',persistPath:process.env.CHL_PERSIST_PATH});b.turn(process.argv[2]||'hola').then(r=>{console.log(r.response);b.close()})\"",
-    "bridge:anthropic": "node -e \"const {createBridge}=require('./src/bridge/bridge');const b=createBridge({provider:'anthropic',persistPath:process.env.CHL_PERSIST_PATH});b.turn(process.argv[2]||'hola').then(r=>{console.log(r.response);b.close()})\"",
-    "bridge:ollama": "node -e \"const {createBridge}=require('./src/bridge/bridge');const b=createBridge({provider:'ollama',persistPath:process.env.CHL_PERSIST_PATH});b.turn(process.argv[2]||'hola').then(r=>{console.log(r.response);b.close()})\"",
-    "serve:finetuned": "python3 scripts/serve_model.py --serve --port 3040",
-    "chat:finetuned": "python3 scripts/serve_model.py --chat",
-    "chat:unified": "node scripts/chat-unified.js",
-    "ingest:hf": "python3 scripts/ingest_hf.py"
+    "serve:ollama-api": "PORT=${PORT:-33141} node ./ollama_adapter.js"
   }
 }

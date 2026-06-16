@@ -352,6 +352,60 @@ class OpenAICompatAdapter {
   }
 }
 
+// Helper functions for Ollama‑compatible shim
+function getModelTags() {
+  // Currently only the CHL episodic memory model is advertised
+  return ['chl-episodic-agent-memory'];
+}
+
+/**
+ * Handles Ollama /api/generate requests by delegating to the CHL bridge.
+ * Expects a payload with at least { model, prompt }.
+ */
+async function handleOllamaGenerate(body) {
+  const { model, prompt, stream } = body;
+  // Import bridge lazily to avoid circular dependency issues
+  const { createBridge } = require('./bridge');
+  const bridge = createBridge({ provider: 'ollama', model });
+  const result = await bridge.turn(prompt);
+  await bridge.close();
+  const { model, prompt, stream } = body;
+  // Use quickTurn which creates a bridge on‑the‑fly with the requested model.
+  
+  return {
+    model: model || 'chl-episodic-agent-memory',
+    created_at: new Date().toISOString(),
+    response: result.response,
+    done: true,
+  };
+}
+
+/**
+ * Handles Ollama /api/chat requests. Expects a payload with a `messages` array.
+ * The last user message is sent to the bridge; the response is wrapped in the
+ * Ollama response shape.
+ */
+async function handleOllamaChat(body) {
+  const { model, messages } = body;
+  const userMsg = messages?.reverse().find(m => m.role === 'user');
+  const prompt = userMsg?.content || '';
+  const { createBridge } = require('./bridge');
+  const bridge = createBridge({ provider: 'ollama', model });
+  const result = await bridge.turn(prompt);
+  await bridge.close();
+  const { model, messages } = body;
+  // Find the most recent user message (Ollama expects a single prompt).
+  const userMsg = messages?.reverse().find(m => m.role === 'user');
+  const prompt = userMsg?.content || '';
+  
+  return {
+    model: model || 'chl-episodic-agent-memory',
+    created_at: new Date().toISOString(),
+    response: result.response,
+    done: true,
+  };
+}
+
 module.exports = {
   createAdapter,
   CHL_TOOLS_FOR_LLM,
@@ -360,4 +414,8 @@ module.exports = {
   OllamaAdapter,
   OpenRouterAdapter,
   OpenAICompatAdapter,
+  // Ollama shim helpers
+  getModelTags,
+  handleOllamaGenerate,
+  handleOllamaChat,
 };
