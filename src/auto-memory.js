@@ -17,8 +17,11 @@
  * - Timestamp
  * - Tool calls realizadas (nombres + args resumidos)
  * - Session ID
- * - Metadata: duración, modelo usado, tokens
+ * - Metadata: duración, modelo usado, tokens, memoryType inferido
  */
+
+const { classifyMemory } = require("./memory-classifier");
+const { MemoryType, getDefaultExpiry } = require("./memory-types");
 
 const SIGNAL_PATTERNS = [
   // Preferencias
@@ -168,13 +171,42 @@ function buildMemoryPayload(interaction) {
   };
 }
 
+function inferMemoryTypeForInteraction(interaction) {
+  const query = String(interaction.query || "").trim();
+  const response = String(interaction.response || "").trim();
+  const text = `${query}\n${response}`.trim();
+
+  // Preferencias / identidad del usuario => user_profile.
+  if (/\b(me llamo|mi nombre es|soy |trabajo en|mi proyecto|mi equipo|prefiero|me gusta|no me gusta|quiero que|no quiero)\b/i.test(text)) {
+    return MemoryType.USER_PROFILE;
+  }
+  // Instrucciones sobre la personalidad del asistente => self_profile.
+  if (/\b(responde como|act[uú]a como|tu personalidad|tu estilo|tu voz|tu tono|c[oó]mo deber[ií]as)\b/i.test(text)) {
+    return MemoryType.SELF_PROFILE;
+  }
+  // Hechos técnicos duraderos => knowledge, si no medium_term.
+  if (/\b(documentaci[oó]n|api|librer[ií]a|framework|arquitectura|patr[oó]n|configuraci[oó]n|deploy|instalaci[oó]n)\b/i.test(text)) {
+    return MemoryType.KNOWLEDGE;
+  }
+  // Decisiones explícitas => long_term.
+  if (/\b(decidimos|decisi[oó]n|regla|siempre|nunca|debe ser|deber[ií]amos)\b/i.test(text)) {
+    return MemoryType.LONG_TERM;
+  }
+
+  // Fallback al clasificador general.
+  return classifyMemory(text, null, { source: "auto-memory" });
+}
+
 /**
- * Construye metadata ligera.
+ * Construye metadata ligera con tipo de memoria inferido.
  */
 function buildMemoryMetadata(interaction) {
   const toolNames = (interaction.toolCalls || [])
     .map(tc => tc.function?.name || tc.name || "")
     .filter(Boolean);
+
+  const memoryType = inferMemoryTypeForInteraction(interaction);
+  const now = Date.now();
 
   return {
     source: "auto-memory",
@@ -183,6 +215,9 @@ function buildMemoryMetadata(interaction) {
     toolCount: toolNames.length,
     toolsUsed: toolNames.slice(0, 5),
     durationMs: interaction.stats?.lastTurnMs || 0,
+    memoryType,
+    createdAt: now,
+    expiresAt: getDefaultExpiry(memoryType),
   };
 }
 

@@ -87,8 +87,11 @@ console.log(result.response);
 
 | Herramienta | Descripción |
 |------------|-------------|
-| `chl_remember` | Guarda un hecho, preferencia o contexto |
-| `chl_recall` | Recupera memorias por similitud semántica |
+| `chl_remember` | Guarda un hecho, preferencia o contexto (con clasificación automática de tipo) |
+| `chl_remember_typed` | Guarda una memoria con tipo explícito y TTL opcional |
+| `chl_recall` | Recupera memorias por similitud semántica (con filtros de tipo e intención) |
+| `chl_recall_by_type` | Recupera memorias filtradas por uno o varios tipos |
+| `chl_recall_personalized` | Recupera memorias priorizando perfil del usuario y personalidad de la IA |
 | `chl_infer` | Sintetiza la mejor respuesta desde memoria |
 | `chl_think` | Traza de pensamiento estructurada con evidencias |
 | `chl_plan` | Plan paso a paso basado en memoria |
@@ -98,6 +101,69 @@ console.log(result.response);
 | `chl_snapshot` | Vista compacta del estado actual |
 | `chl_backup_memory` | Exporta la memoria completa |
 | `chl_restore_memory` | Restaura desde backup |
+
+### Memoria tipada y scoring adaptativo
+
+CHL clasifica automáticamente cada entrada en uno de los tipos de memoria:
+
+- `ephemeral` — contexto temporal que expira rápidamente
+- `short_term` — hechos recientes de la sesión actual
+- `medium_term` — contexto de horas/días
+- `long_term` — decisiones, preferencias estables, aprendizajes duraderos
+- `user_profile` — nombre, preferencias e identidad del usuario
+- `self_profile` — personalidad, instrucciones y rol de la IA
+- `knowledge` — hechos del mundo, documentación, datos técnicos
+- `episodic` — eventos concretos de la conversación o del proyecto
+
+#### Guardar con tipo explícito
+
+```json
+{
+  "input": "El usuario prefiere reuniones por la mañana",
+  "memoryType": "user_profile",
+  "source": "user"
+}
+```
+
+También se puede forzar un TTL:
+
+```json
+{
+  "input": "Token de acceso temporal",
+  "memoryType": "ephemeral",
+  "ttlSeconds": 300
+}
+```
+
+#### Recuperar con intención y filtros
+
+`chl_recall` detecta automáticamente la intención de la query y enruta hacia los tipos de memoria más relevantes. También permite forzar filtros:
+
+```json
+{
+  "query": "quién eres",
+  "intent": "self_reflection",
+  "memoryType": "self_profile"
+}
+```
+
+```json
+{
+  "query": "cómo me llamo",
+  "intent": "user_recall",
+  "memoryType": "user_profile"
+}
+```
+
+Para búsquedas personales se usa `chl_recall_personalized`, que prioriza `user_profile` y `self_profile`:
+
+```json
+{
+  "query": "qué me gusta y cómo respondes"
+}
+```
+
+El contexto enviado al modelo grande se formatea en secciones etiquetadas por tipo, colocando primero el perfil del usuario y la personalidad de la IA.
 
 ## Instalación
 

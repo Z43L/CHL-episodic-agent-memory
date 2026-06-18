@@ -10,6 +10,17 @@ const {
   writeMemoryArchive,
 } = require("./backup");
 const { loadLexiconState, saveLexiconState } = require("./concepts");
+const { classifyMemory } = require("./memory-classifier");
+const {
+  MemoryType,
+  normalizeMemoryType,
+  getDefaultExpiry,
+  getTypeBoostForIntent,
+  getScoringProfileForIntent,
+  temporalScore,
+  isExpired,
+} = require("./memory-types");
+const { detectQueryIntent } = require("./query-intent");
 const { buildConceptGraph } = require("./graph");
 const {
   buildAnswer,
@@ -339,29 +350,47 @@ this._ready = this._loadOrCreateIndex()
   }
 
   remember(input, payload = null, metadata = {}) {
+    const inferredType = metadata.memoryType ?? classifyMemory(input, payload, metadata);
+    const now = Date.now();
+    const enrichedMetadata = {
+      ...metadata,
+      memoryType: inferredType,
+      createdAt: metadata.createdAt ?? now,
+      expiresAt: metadata.expiresAt ?? getDefaultExpiry(inferredType),
+      source: metadata.source ?? "",
+    };
+
     if (this.fallback) {
-      const entry = this.fallback.remember(input, payload, metadata);
+      const entry = this.fallback.remember(input, payload, enrichedMetadata);
       this._appendEvent({
         type: "remember",
         text: typeof input === "string" ? input : JSON.stringify(input),
         payload,
-        metadata,
+        metadata: enrichedMetadata,
       });
       return entry;
     }
     const text = this._normalize(input);
     const payloadJson = JSON.stringify({
       payload,
-      metadata,
+      metadata: enrichedMetadata,
       sourceText: typeof input === "string" ? input : JSON.stringify(input),
     });
     const quality = metadata.quality ?? 1;
-    const entry = JSON.parse(this.engine.remember(text, payloadJson, quality));
+    const rawEntry = JSON.parse(this.engine.remember(text, payloadJson, quality));
+    const entry = {
+      ...rawEntry,
+      memoryType: inferredType,
+      source: enrichedMetadata.source,
+      createdAt: enrichedMetadata.createdAt,
+      expiresAt: enrichedMetadata.expiresAt,
+      metadata: enrichedMetadata,
+    };
     this._appendEvent({
       type: "remember",
       text: typeof input === "string" ? input : JSON.stringify(input),
       payload,
-      metadata,
+      metadata: enrichedMetadata,
     });
     return entry;
   }
@@ -371,13 +400,92 @@ this._ready = this._loadOrCreateIndex()
       return this.fallback.recall(query, options);
     }
     const text = this._normalize(query);
-    const raw = JSON.parse(this.engine.query(text, options.topK ?? 5));
-    return {
-      ...raw,
-      candidates: raw.candidates.map((candidate) => ({
+    const topK = Math.max(1, Math.floor(options.topK ?? 5));
+
+    const hasAdaptiveFilters =
+      options.memoryType != null ||
+      options.includeTypes != null ||
+      options.memoryTypes != null ||
+      options.excludeTypes != null ||
+      options.timeWindowMs != null ||
+      options.minQuality != null ||
+      options.source != null ||
+      options.intent != null ||
+      options.boostProfile != null;
+
+    const oversample = hasAdaptiveFilters ? Math.min(topK * 5, 100) : topK;
+    const raw = JSON.parse(this.engine.query(text, oversample));
+    const now = Date.now();
+    const intent = options.intent ? String(options.intent).toLowerCase() : detectQueryIntent(query);
+
+    let allowedTypes = null;
+    if (options.memoryType) {
+      allowedTypes = [normalizeMemoryType(options.memoryType)].filter(Boolean);
+    } else {
+      const included = Array.isArray(options.includeTypes)
+        ? options.includeTypes
+        : Array.isArray(options.memoryTypes)
+          ? options.memoryTypes
+          : null;
+      if (included && included.length > 0) {
+        allowedTypes = included.map(normalizeMemoryType).filter(Boolean);
+      }
+    }
+    const excludedTypes = Array.isArray(options.excludeTypes)
+      ? options.excludeTypes.map(normalizeMemoryType).filter(Boolean)
+      : [];
+    const timeWindowMs = Number(options.timeWindowMs) || null;
+    const minQuality = typeof options.minQuality === "number" ? options.minQuality : null;
+    const sourceFilter = options.source ? String(options.source) : null;
+
+    const scored = [];
+    for (const candidate of raw.candidates) {
+      const meta = unwrapCandidateMetadata(candidate) || {};
+      const memoryType = meta.memoryType || MemoryType.SHORT_TERM;
+
+      if (isExpired(meta.expiresAt, now)) continue;
+      if (allowedTypes && !allowedTypes.includes(memoryType)) continue;
+      if (excludedTypes.length > 0 && excludedTypes.includes(memoryType)) continue;
+      if (timeWindowMs != null && meta.createdAt && now - meta.createdAt > timeWindowMs) continue;
+      if (minQuality != null && (candidate.quality ?? 1) < minQuality) continue;
+      if (sourceFilter != null && meta.source !== sourceFilter) continue;
+
+      let newScore = candidate.score;
+      if (hasAdaptiveFilters) {
+        const boost = getTypeBoostForIntent(intent, memoryType);
+        const temporal = temporalScore({ memoryType, createdAt: meta.createdAt }, now);
+        const quality = candidate.quality ?? meta.quality ?? 1;
+        newScore *= 1 + boost;
+        newScore *= 0.4 + 0.6 * temporal;
+        newScore *= 0.5 + 0.5 * quality;
+      }
+
+      scored.push({
         ...candidate,
+        score: newScore,
         payload: unwrapCandidatePayload(candidate),
-      })),
+        metadata: meta,
+      });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    const selected = scored.slice(0, topK);
+
+    let confidence = 0;
+    if (selected.length > 0) {
+      const best = selected[0].score;
+      if (selected.length === 1) {
+        confidence = Math.max(0, Math.min(1, best));
+      } else {
+        const second = selected[1].score;
+        confidence = Math.max(0, Math.min(1, 0.5 * best + 0.5 * (best - second)));
+      }
+    }
+
+    return {
+      confidence,
+      queryHash: raw.queryHash,
+      candidates: selected,
     };
   }
 
@@ -863,6 +971,27 @@ function safeParse(value) {
   } catch {
     return value;
   }
+}
+
+function unwrapCandidateMetadata(candidate) {
+  if (!candidate || typeof candidate !== "object") return {};
+  if (candidate.metadata !== undefined) return candidate.metadata || {};
+  if (candidate.entry && candidate.entry.metadata !== undefined) return candidate.entry.metadata || {};
+
+  const payloadJson = candidate.payloadJson !== undefined
+    ? candidate.payloadJson
+    : candidate.entry?.payloadJson;
+  if (payloadJson !== undefined) {
+    const parsed = safeParse(payloadJson);
+    if (parsed && typeof parsed === "object" && parsed.metadata) return parsed.metadata;
+  }
+
+  const payload = candidate.payload !== undefined
+    ? candidate.payload
+    : candidate.entry?.payload;
+  if (payload && typeof payload === "object" && payload.metadata) return payload.metadata;
+
+  return {};
 }
 
 function unwrapCandidatePayload(candidate) {

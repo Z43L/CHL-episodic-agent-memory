@@ -24,6 +24,29 @@ const {
 const { NativeCHL } = require("./native");
 const { analyzeText } = require("./analysis");
 const {
+  MemoryType,
+  MemoryTier,
+  TYPE_SCORING_PROFILES,
+  TYPE_TO_TIER,
+  TYPE_EVICTION_PRIORITY,
+  normalizeMemoryType,
+  getTierForType,
+  getDefaultExpiry,
+  getEvictionPriority,
+  getScoringProfile,
+  temporalScore,
+  isExpired,
+} = require("./memory-types");
+const { classifyMemory } = require("./memory-classifier");
+const {
+  QueryIntent,
+  detectQueryIntent,
+  intentToMemoryTypes,
+  getTypeBoostForIntent,
+  getScoringProfileForIntent,
+  buildQueryOptions,
+} = require("./query-intent");
+const {
   buildConsolidation,
   episodePatternKey,
   mergePairLists,
@@ -249,4 +272,27 @@ Object.assign(module.exports, {
   hasStrongSignal,
   summarizeResponse,
   summarizeToolCalls,
+
+  // Memory types & adaptive scoring
+  MemoryType,
+  MemoryTier,
+  TYPE_SCORING_PROFILES,
+  TYPE_TO_TIER,
+  TYPE_EVICTION_PRIORITY,
+  normalizeMemoryType,
+  getTierForType,
+  getDefaultExpiry,
+  getEvictionPriority,
+  getScoringProfile,
+  temporalScore,
+  isExpired,
+
+  classifyMemory,
+
+  QueryIntent,
+  detectQueryIntent,
+  intentToMemoryTypes,
+  getTypeBoostForIntent,
+  getScoringProfileForIntent,
+  buildQueryOptions,
 });

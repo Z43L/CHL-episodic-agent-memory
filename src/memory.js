@@ -11,7 +11,25 @@ const {
 } = require("./hypervector");
 const { HyperAttentionContext } = require("./hyperattention");
 const { LexiconTrainer } = require("./lexiconLearner");
-const { clamp, charNgrams, normalizeText, tokenize, wordsToHex } = require("./utils");
+const {
+  clamp,
+  charNgrams,
+  normalizeText,
+  tokenize,
+  wordsToHex,
+} = require("./utils");
+const {
+  MemoryType,
+  getDefaultExpiry,
+  getEvictionPriority,
+  getScoringProfile,
+  getTierForType,
+  isExpired,
+  normalizeMemoryType,
+  temporalScore,
+} = require("./memory-types");
+const { classifyMemory } = require("./memory-classifier");
+const { buildQueryOptions, getTypeBoostForIntent } = require("./query-intent");
 const crypto = require("crypto");
 
 function makeBandKey(words, bandIndex, wordsPerBand) {
@@ -137,6 +155,71 @@ function tokenSequenceSimilarity(a, b) {
   return dp[left.length][right.length] / Math.max(left.length, right.length);
 }
 
+// ─── Nuevas señales de scoring ───────────────────────────────
+
+function phraseOverlapScore(queryReps, entryReps) {
+  const left = queryReps.tokenTrigrams ?? [];
+  const right = entryReps.tokenTrigrams ?? [];
+  if (left.length === 0 || right.length === 0) return 0;
+  const setA = new Set(left);
+  const setB = new Set(right);
+  let inter = 0;
+  for (const item of setA) {
+    if (setB.has(item)) inter += 1;
+  }
+  return inter / Math.max(setA.size, setB.size);
+}
+
+function wordOrderScore(queryReps, entryReps) {
+  const left = queryReps.focusTokens ?? [];
+  const right = entryReps.focusTokens ?? [];
+  if (left.length === 0 || right.length === 0) return 0;
+  const dp = Array.from({ length: left.length + 1 }, () => new Uint16Array(right.length + 1));
+  for (let i = 1; i <= left.length; i += 1) {
+    for (let j = 1; j <= right.length; j += 1) {
+      dp[i][j] = left[i - 1] === right[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  return dp[left.length][right.length] / Math.max(left.length, right.length);
+}
+
+function entityMatchScore(queryReps, entryReps) {
+  const qConcepts = queryReps.concepts ?? [];
+  const eConcepts = entryReps.concepts ?? [];
+  if (qConcepts.length === 0 || eConcepts.length === 0) return 0;
+  const setE = new Set(eConcepts);
+  let hits = 0;
+  for (const concept of qConcepts) {
+    if (setE.has(concept)) hits += 1;
+  }
+  return hits / qConcepts.length;
+}
+
+function zNormalize(values) {
+  if (values.length === 0) return values;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const variance = values.reduce((a, b) => a + b * b, 0) / values.length - mean * mean;
+  const std = Math.sqrt(Math.max(0, variance)) || 1;
+  return values.map((v) => (v - mean) / std);
+}
+
+function mergeMemoryType(a, b) {
+  // Jerarquía de importancia: perfiles y conocimiento estable ganan sobre corto plazo.
+  const rank = {
+    [MemoryType.SELF_PROFILE]: 7,
+    [MemoryType.USER_PROFILE]: 6,
+    [MemoryType.LONG_TERM]: 5,
+    [MemoryType.KNOWLEDGE]: 4,
+    [MemoryType.MEDIUM_TERM]: 3,
+    [MemoryType.EPISODIC]: 2,
+    [MemoryType.SHORT_TERM]: 1,
+    [MemoryType.EPHEMERAL]: 0,
+  };
+  const rankA = rank[a] ?? 1;
+  const rankB = rank[b] ?? 1;
+  return rankA >= rankB ? a : b;
+}
+
 class AssociativeMemory {
   constructor(options = {}) {
     this.bitCount = options.bitCount ?? 128;
@@ -163,6 +246,9 @@ class AssociativeMemory {
     this.canonicalTextMap = new Map();
     this.tokenMaps = [new Map(), new Map(), new Map(), new Map(), new Map(), new Map()];
     this.payloadTokenMaps = [new Map(), new Map(), new Map(), new Map(), new Map(), new Map()];
+    // Índice por tipo de memoria y por fuente
+    this.typeIndex = new Map();   // memoryType → Set<entryId>
+    this.sourceMap = new Map();   // source → Set<entryId>
     const { bands, wordsPerBand } = createBands(this.bitCount, this.bandBits);
     this.bandCount = bands;
     this.wordsPerBand = wordsPerBand;
@@ -197,22 +283,46 @@ class AssociativeMemory {
 
   makeEntry(input, payload = null, metadata = {}) {
     const text = typeof input === "string" ? input : JSON.stringify(input);
+    const memoryType = normalizeMemoryType(
+      metadata.memoryType ?? classifyMemory(input, payload, metadata)
+    );
+    const source = metadata.source ?? "manual";
+    const tier = metadata.tier ?? getTierForType(memoryType);
+    const expiresAt =
+      metadata.expiresAt ??
+      (metadata.ttlMs ? Date.now() + metadata.ttlMs : getDefaultExpiry(memoryType));
+
     const representations = buildRepresentations(text);
     const payloadText = stringifyPayload(payload);
     const payloadRepresentations = payloadText ? buildRepresentations(payloadText) : null;
     const hash = this.encodeText(text);
     const hypervector = prototypeVectorFromText(text, this.hyperDim, this.seed);
     const now = Date.now();
+
+    // Quality por defecto ligeramente mayor para perfiles y conocimiento estable.
+    let quality = metadata.quality ?? 5;
+    if (metadata.quality === undefined) {
+      if (memoryType === MemoryType.SELF_PROFILE || memoryType === MemoryType.USER_PROFILE) {
+        quality = 7;
+      } else if (memoryType === MemoryType.LONG_TERM || memoryType === MemoryType.KNOWLEDGE) {
+        quality = 6;
+      }
+    }
+
     return {
       id: metadata.id || crypto.randomUUID(),
       text,
+      memoryType,
+      tier,
+      expiresAt,
+      source,
       representations,
       payloadRepresentations,
       hash,
       hypervector,
       payload: payload ?? input,
-      metadata: { ...metadata },
-      quality: metadata.quality ?? 1,
+      metadata: { ...metadata, memoryType, source },
+      quality: clamp(quality, 0, 10),
       createdAt: now,
       updatedAt: now,
       lastAccessAt: now,
@@ -235,6 +345,19 @@ class AssociativeMemory {
         }
         this.conceptIndex.get(conceptId).add(entry.id);
       }
+    }
+    // Indexar por tipo de memoria y por fuente
+    if (entry.memoryType) {
+      if (!this.typeIndex.has(entry.memoryType)) {
+        this.typeIndex.set(entry.memoryType, new Set());
+      }
+      this.typeIndex.get(entry.memoryType).add(entry.id);
+    }
+    if (entry.source) {
+      if (!this.sourceMap.has(entry.source)) {
+        this.sourceMap.set(entry.source, new Set());
+      }
+      this.sourceMap.get(entry.source).add(entry.id);
     }
     for (let bandIndex = 0; bandIndex < this.bandCount; bandIndex += 1) {
       const key = makeBandKey(entry.hash, bandIndex, this.wordsPerBand);
@@ -272,6 +395,19 @@ class AssociativeMemory {
         if (this.conceptIndex.get(conceptId).size === 0) {
           this.conceptIndex.delete(conceptId);
         }
+      }
+    }
+    // Desindexar por tipo y fuente
+    if (entry.memoryType && this.typeIndex.has(entry.memoryType)) {
+      this.typeIndex.get(entry.memoryType).delete(entry.id);
+      if (this.typeIndex.get(entry.memoryType).size === 0) {
+        this.typeIndex.delete(entry.memoryType);
+      }
+    }
+    if (entry.source && this.sourceMap.has(entry.source)) {
+      this.sourceMap.get(entry.source).delete(entry.id);
+      if (this.sourceMap.get(entry.source).size === 0) {
+        this.sourceMap.delete(entry.source);
       }
     }
     for (let bandIndex = 0; bandIndex < this.bandCount; bandIndex += 1) {
@@ -353,6 +489,13 @@ class AssociativeMemory {
         entry.payloadRepresentations
       );
       merged.payload = this._mergePayloads(merged.payload, entry.payload);
+      merged.memoryType = mergeMemoryType(merged.memoryType, entry.memoryType);
+      merged.tier = getTierForType(merged.memoryType);
+      merged.expiresAt = Math.max(
+        merged.expiresAt || 0,
+        entry.expiresAt || 0,
+        getDefaultExpiry(merged.memoryType)
+      );
       merged.quality = clamp((merged.quality + entry.quality) / 2, 0, 10);
       merged.updatedAt = Date.now();
       merged.prototypeCount += 1;
@@ -401,9 +544,12 @@ class AssociativeMemory {
       normalizedText: previous.normalizedText ?? next.normalizedText ?? "",
       canonicalText: previous.canonicalText ?? next.canonicalText ?? "",
       tokens: mergeUnique(previous.tokens, next.tokens),
+      tokenBigrams: mergeUnique(previous.tokenBigrams, next.tokenBigrams),
+      tokenTrigrams: mergeUnique(previous.tokenTrigrams, next.tokenTrigrams),
       ngrams3: mergeUnique(previous.ngrams3, next.ngrams3),
       ngrams4: mergeUnique(previous.ngrams4, next.ngrams4),
       concepts: mergeUnique(previous.concepts, next.concepts),
+      focusTokens: mergeUnique(previous.focusTokens, next.focusTokens),
       negated: Boolean(previous.negated || next.negated),
     };
   }
@@ -416,14 +562,17 @@ class AssociativeMemory {
       normalizedText: previous.normalizedText ?? next.normalizedText ?? "",
       canonicalText: previous.canonicalText ?? next.canonicalText ?? "",
       tokens: mergeUnique(previous.tokens, next.tokens),
+      tokenBigrams: mergeUnique(previous.tokenBigrams, next.tokenBigrams),
+      tokenTrigrams: mergeUnique(previous.tokenTrigrams, next.tokenTrigrams),
       ngrams3: mergeUnique(previous.ngrams3, next.ngrams3),
       ngrams4: mergeUnique(previous.ngrams4, next.ngrams4),
       concepts: mergeUnique(previous.concepts, next.concepts),
+      focusTokens: mergeUnique(previous.focusTokens, next.focusTokens),
       negated: Boolean(previous.negated || next.negated),
     };
   }
 
-  _candidateEntries(queryReps, queryHash) {
+  _candidateEntries(queryReps, queryHash, options = {}) {
     const ids = new Set();
     for (let bandIndex = 0; bandIndex < this.bandCount; bandIndex += 1) {
       const key = makeBandKey(queryHash, bandIndex, this.wordsPerBand);
@@ -435,13 +584,61 @@ class AssociativeMemory {
     this._collectTextCandidates(ids, this.canonicalTextMap, queryReps.canonicalText);
     this._collectTermCandidates(ids, this.tokenMaps[3], queryReps.concepts, 12);
     this._collectTermCandidates(ids, this.tokenMaps[4], queryReps.focusTokens, 12);
+
+    // Si hay filtros por tipo, ampliar candidatos con el índice de tipo.
+    if (options.memoryTypes && options.memoryTypes.length > 0) {
+      for (const type of options.memoryTypes) {
+        const typeIds = this.typeIndex.get(type);
+        if (!typeIds) continue;
+        for (const id of typeIds) ids.add(id);
+      }
+    }
+
     if (ids.size === 0) {
       for (const id of this.entries.keys()) {
         ids.add(id);
         if (ids.size >= this.maxCandidates) break;
       }
     }
-    return Array.from(ids, (id) => this.entries.get(id)).filter(Boolean);
+
+    const now = Date.now();
+    return Array.from(ids, (id) => this.entries.get(id))
+      .filter(Boolean)
+      .filter((entry) => this._candidateFilter(entry, options, now));
+  }
+
+  _candidateFilter(entry, options, now) {
+    // Descartar expiradas
+    if (isExpired(entry, now)) return false;
+
+    // Filtro por tipo de memoria
+    if (options.memoryTypes && options.memoryTypes.length > 0) {
+      if (!options.memoryTypes.includes(entry.memoryType)) return false;
+    }
+
+    // Exclusión por tipo
+    if (options.excludeTypes && options.excludeTypes.length > 0) {
+      if (options.excludeTypes.includes(entry.memoryType)) return false;
+    }
+
+    // Filtro temporal
+    if (options.timeWindow && Number.isFinite(options.timeWindow)) {
+      const age = now - (entry.createdAt || entry.lastAccessAt || now);
+      if (age > options.timeWindow) return false;
+    }
+
+    // Calidad mínima
+    if (options.minQuality && Number.isFinite(options.minQuality)) {
+      if ((entry.quality ?? 0) < options.minQuality) return false;
+    }
+
+    // Filtro por fuente
+    if (options.sourceFilter) {
+      const filters = Array.isArray(options.sourceFilter) ? options.sourceFilter : [options.sourceFilter];
+      if (!filters.includes(entry.source)) return false;
+    }
+
+    return true;
   }
 
   _collectTermCandidates(ids, map, terms, limit) {
@@ -461,18 +658,16 @@ class AssociativeMemory {
     for (const id of bucket) ids.add(id);
   }
 
-  _scoreCandidate(queryReps, queryHash, queryHypervector, entry, options = {}) {
+  _computeDimensionScores(queryReps, queryHash, queryHypervector, entry) {
     const hashSim = 1 - hammingDistance(queryHash, entry.hash) / this.bitCount;
     const hvSim = similarity(queryHypervector, entry.hypervector);
     const entryReps = entry.representations ?? buildRepresentations(entry.text ?? "");
-    const { concept, negationMatch } = representationSimilarity(queryReps, entryReps);
-    if (options.fastEval) {
-      return 0.42 * hashSim + 0.38 * hvSim + 0.18 * concept + 0.02 * negationMatch;
-    }
-    const ageMs = Math.max(0, Date.now() - entry.lastAccessAt);
-    const recency = Math.exp(-ageMs / this.recentHalfLifeMs);
+    const repSim = representationSimilarity(queryReps, entryReps);
+
+    const now = Date.now();
     const quality = clamp(entry.quality / 10, 0, 1);
-    
+    const recency = temporalScore(entry, now);
+
     // Prototype similarity (from lexicon trainer)
     let protoSim = 0;
     let intentSim = 0;
@@ -483,24 +678,65 @@ class AssociativeMemory {
         intentSim = this.lexiconTrainer.intentSimilarity(entry.text ?? "", conceptId);
       }
     }
-    
-    // Si hay HyperAttention, usar pesos dinámicos
-    if (this.attention) {
-      const dimScores = {
-        hash: hashSim,
-        hypervector: hvSim,
-        concept: concept,
-        prototype: protoSim,
-        intent: intentSim,
-        recency: recency,
-        quality: quality,
-        negation: negationMatch,
-      };
-      return this.attention.score(queryHypervector, dimScores);
+
+    return {
+      hash: hashSim,
+      hypervector: hvSim,
+      concept: repSim.concept,
+      prototype: protoSim,
+      intent: intentSim,
+      recency,
+      quality,
+      negation: repSim.negationMatch,
+      phraseOverlap: phraseOverlapScore(queryReps, entryReps),
+      wordOrder: wordOrderScore(queryReps, entryReps),
+      entityMatch: entityMatchScore(queryReps, entryReps),
+    };
+  }
+
+  _scoreFromDimScores(dimScores, entry, options = {}) {
+    if (options.fastEval) {
+      return 0.42 * dimScores.hash + 0.38 * dimScores.hypervector + 0.18 * dimScores.concept + 0.02 * dimScores.negation;
     }
-    
-    // Fallback: pesos fijos (con nuevos términos)
-    return 0.22 * hashSim + 0.18 * hvSim + 0.16 * concept + 0.18 * protoSim + 0.12 * intentSim + 0.08 * recency + 0.04 * quality + 0.02 * negationMatch;
+
+    // Perfil de scoring según tipo de memoria e intent de query.
+    const scoringProfile = options.queryIntent
+      ? require("./query-intent").getScoringProfileForIntent(options.queryIntent, entry.memoryType)
+      : getScoringProfile(entry.memoryType);
+
+    // Si hay HyperAttention, mezclar pesos aprendidos con el perfil de tipo.
+    let weightedScore = 0;
+    if (this.attention) {
+      const attentionWeights = this.attention.computeWeights(options.queryHypervector ?? entry.hypervector);
+      for (const [dim, baseWeight] of Object.entries(scoringProfile)) {
+        const learnedWeight = attentionWeights.get(dim) ?? baseWeight;
+        // 70% perfil de tipo + 30% atención aprendida (más estable que 20/80).
+        const weight = 0.7 * baseWeight + 0.3 * learnedWeight;
+        weightedScore += (dimScores[dim] ?? 0) * weight;
+      }
+    } else {
+      for (const [dim, weight] of Object.entries(scoringProfile)) {
+        weightedScore += (dimScores[dim] ?? 0) * weight;
+      }
+    }
+
+    // Boost por coincidencia de tipo con el intent de la query.
+    if (options.queryIntent) {
+      const typeBoost = getTypeBoostForIntent(options.queryIntent, entry.memoryType);
+      weightedScore += typeBoost;
+    }
+
+    return clamp(weightedScore, 0, 1);
+  }
+
+  _scoreCandidate(queryReps, queryHash, queryHypervector, entry, options = {}) {
+    const dimScores = options.dimScores
+      ? { ...options.dimScores }
+      : this._computeDimensionScores(queryReps, queryHash, queryHypervector, entry);
+    return this._scoreFromDimScores(dimScores, entry, {
+      ...options,
+      queryHypervector,
+    });
   }
 
   query(input, options = {}) {
@@ -513,22 +749,54 @@ class AssociativeMemory {
         text = canonicalized;
       }
     }
+
+    // Detectar intención y tipos objetivo de memoria.
+    const mergedOptions = buildQueryOptions(text, options);
+
     const queryReps = buildRepresentations(text);
     const queryHash = this.encodeText(text);
     const queryHypervector = prototypeVectorFromText(text, this.hyperDim, this.seed);
-    const candidates = this._candidateEntries(queryReps, queryHash);
-    const scored = candidates
-      .map((entry) => ({
+
+    const candidates = this._candidateEntries(queryReps, queryHash, mergedOptions);
+
+    // Calcular dimension scores una sola vez por candidato.
+    const dimScoresList = candidates.map((entry) => ({
+      entry,
+      dimScores: this._computeDimensionScores(queryReps, queryHash, queryHypervector, entry),
+    }));
+
+    // Normalización z-score por dimensión cuando hay suficientes candidatos.
+    const normalize =
+      mergedOptions.normalizeDimensions !== false && dimScoresList.length >= 10;
+    if (normalize) {
+      const dims = ["hash", "hypervector", "concept", "recency", "quality", "phraseOverlap", "wordOrder", "entityMatch"];
+      for (const dim of dims) {
+        const values = dimScoresList.map((d) => d.dimScores[dim] ?? 0);
+        const normalized = zNormalize(values);
+        for (let i = 0; i < dimScoresList.length; i += 1) {
+          dimScoresList[i].dimScores[dim] = normalized[i];
+        }
+      }
+    }
+
+    let scored = dimScoresList
+      .map(({ entry, dimScores }) => ({
         entry,
         hashDistance: hammingDistance(queryHash, entry.hash),
-        score: this._scoreCandidate(queryReps, queryHash, queryHypervector, entry, options),
+        score: this._scoreFromDimScores(dimScores, entry, {
+          ...mergedOptions,
+          queryHypervector,
+          fastEval: mergedOptions.fastEval,
+        }),
       }))
       .sort((a, b) => b.score - a.score);
-    
+
     // Two-pass retrieval: si top-1 es débil, expandir candidatos por concepto/alias
-    const top1Threshold = options.secondPassThreshold ?? 0.72;
-    const shouldExpand = !options.disableSecondPass && this.lexiconTrainer
-      && (scored.length === 0 || (scored[0]?.score ?? 0) < top1Threshold);
+    const top1Threshold = mergedOptions.secondPassThreshold ?? 0.72;
+    const shouldExpand =
+      !mergedOptions.disableSecondPass &&
+      this.lexiconTrainer &&
+      (scored.length === 0 || (scored[0]?.score ?? 0) < top1Threshold);
     if (shouldExpand) {
       const conceptCandidates = new Set();
       const queryConcept = this.lexiconTrainer.resolveConcept(text);
@@ -547,17 +815,21 @@ class AssociativeMemory {
       for (const id of conceptCandidates) {
         if (existingIds.has(id)) continue;
         const entry = this.entries.get(id);
-        if (!entry) continue;
+        if (!entry || this._candidateFilter(entry, mergedOptions, Date.now())) continue;
+        const dimScores = this._computeDimensionScores(queryReps, queryHash, queryHypervector, entry);
         scored.push({
           entry,
           hashDistance: hammingDistance(queryHash, entry.hash),
-          score: this._scoreCandidate(queryReps, queryHash, queryHypervector, entry, options),
+          score: this._scoreFromDimScores(dimScores, entry, {
+            ...mergedOptions,
+            queryHypervector,
+          }),
         });
       }
       scored.sort((a, b) => b.score - a.score);
     }
 
-    scored.splice(options.topK ?? 5);
+    scored.splice(mergedOptions.topK ?? 5);
 
     if (scored[0]) {
       scored[0].entry.lastAccessAt = Date.now();
@@ -568,6 +840,7 @@ class AssociativeMemory {
     return {
       queryHash,
       queryHypervector,
+      queryIntent: mergedOptions.queryIntent,
       candidates: scored,
       confidence: this._confidence(scored),
     };
@@ -622,8 +895,11 @@ class AssociativeMemory {
     if (!entry) return Number.NEGATIVE_INFINITY;
     const quality = Number(entry.quality ?? 0);
     const access = Number(entry.lastAccessAt ?? 0);
+    const typePriority = getEvictionPriority(entry.memoryType);
+    const expiredPenalty = isExpired(entry) ? -1e15 : 0;
     // Menor prioridad = candidato a expulsión.
-    return quality * 1e12 + access;
+    // Memorias expiradas primero, luego tipo de menor prioridad, luego calidad y acceso.
+    return expiredPenalty + typePriority * quality * 1e12 + access;
   }
 
   _heapPush(node) {
@@ -672,7 +948,20 @@ class AssociativeMemory {
   }
 
   _enforceCapacity() {
-    if (this.entries.size <= this.maxEntries) return;
+    const now = Date.now();
+    // Primero eliminar entradas expiradas, incluso si no estamos al límite.
+    const expiredIds = [];
+    for (const [id, entry] of this.entries) {
+      if (isExpired(entry, now)) expiredIds.push(id);
+    }
+    for (const id of expiredIds) {
+      const victim = this.entries.get(id);
+      if (victim) {
+        this.unindexEntry(victim);
+        this.entries.delete(id);
+      }
+    }
+
     while (this.entries.size > this.maxEntries) {
       const node = this._heapPop();
       if (!node) break;
@@ -685,12 +974,17 @@ class AssociativeMemory {
   }
 
   snapshot() {
+    const typeCounts = {};
+    for (const entry of this.entries.values()) {
+      typeCounts[entry.memoryType] = (typeCounts[entry.memoryType] ?? 0) + 1;
+    }
     return {
       bitCount: this.bitCount,
       bandBits: this.bandBits,
       hyperDim: this.hyperDim,
       profile: this.profile,
       size: this.entries.size,
+      typeCounts,
     };
   }
 
@@ -698,6 +992,8 @@ class AssociativeMemory {
     this.entries.clear();
     this._evictionHeap = [];
     this.conceptIndex.clear();
+    this.typeIndex.clear();
+    this.sourceMap.clear();
     this.bandMaps.forEach((map) => map.clear());
     this.textMap.clear();
     this.canonicalTextMap.clear();
@@ -713,6 +1009,10 @@ class AssociativeMemory {
     const bandSizes = this.bandMaps.map(m => m.size);
     const textMapSize = this.textMap.size;
     const totalEntries = this.entries.size;
+    const typeCounts = {};
+    for (const entry of this.entries.values()) {
+      typeCounts[entry.memoryType] = (typeCounts[entry.memoryType] ?? 0) + 1;
+    }
     return {
       totalEntries,
       bands: this.bandMaps.length,
@@ -720,6 +1020,9 @@ class AssociativeMemory {
       occupiedBuckets: bandSizes.reduce((a, b) => a + b, 0),
       textMapSize,
       conceptIndexSize: this.conceptIndex.size,
+      typeIndexSize: this.typeIndex.size,
+      sourceMapSize: this.sourceMap.size,
+      typeCounts,
     };
   }
 
