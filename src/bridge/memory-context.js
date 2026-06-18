@@ -147,8 +147,30 @@ function buildMemoryContext(opts = {}) {
     }
   }
 
-  // ─── Memorias (el plato fuerte) ───
-  const memoryLines = [];
+  // ─── Memorias agrupadas por tipo ───
+  const TYPE_LABELS = {
+    user_profile: "Perfil del usuario",
+    self_profile: "Personalidad de la IA",
+    knowledge: "Conocimiento",
+    long_term: "Memoria a largo plazo",
+    medium_term: "Memoria a medio plazo",
+    short_term: "Memoria a corto plazo",
+    episodic: "Episodios",
+    ephemeral: "Contexto efímero",
+  };
+
+  const TYPE_PRIORITY = [
+    "user_profile",
+    "self_profile",
+    "knowledge",
+    "long_term",
+    "medium_term",
+    "episodic",
+    "short_term",
+    "ephemeral",
+  ];
+
+  const grouped = new Map();
   let memTokens = 0;
   const memBudget = budget;
 
@@ -170,12 +192,18 @@ function buildMemoryContext(opts = {}) {
     if (memTokens + lineTokens > memBudget) break;
 
     const scoreLabel = score >= 0.95 ? "●" : score >= 0.8 ? "★★★" : score >= 0.6 ? "★★" : score >= 0.4 ? "★" : "·";
-    memoryLines.push(`${scoreLabel} ${line}`);
+    const memoryType = entry.memoryType || "short_term";
+    if (!grouped.has(memoryType)) grouped.set(memoryType, []);
+    grouped.get(memoryType).push(`${scoreLabel} ${line}`);
     memTokens += lineTokens;
   }
 
-  if (memoryLines.length > 0) {
-    sections.push({ label: "Memoria", text: memoryLines.join("\n"), tokens: memTokens });
+  for (const type of TYPE_PRIORITY) {
+    const lines = grouped.get(type);
+    if (!lines || lines.length === 0) continue;
+    const label = TYPE_LABELS[type] || "Memoria";
+    const text = lines.join("\n");
+    sections.push({ label, text, tokens: estimateTokens(text) });
   }
 
   // ─── Ensamblar ───

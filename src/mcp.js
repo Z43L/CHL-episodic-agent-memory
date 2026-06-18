@@ -2,6 +2,21 @@ const { resolveMemoryProfile } = require("./profiles");
 const { serializePairList } = require("./concepts");
 const { processFile, scanDirectory, scanDirectoryStats } = require("./ingester");
 const { evaluateInteraction, buildMemoryEntry, buildMemoryPayload, buildMemoryMetadata } = require("./auto-memory");
+const {
+  MemoryType,
+  normalizeMemoryType,
+  getDefaultExpiry,
+  isExpired,
+} = require("./memory-types");
+const { classifyMemory } = require("./memory-classifier");
+const {
+  QueryIntent,
+  detectQueryIntent,
+  intentToMemoryTypes,
+  getTypeBoostForIntent,
+  getScoringProfileForIntent,
+  buildQueryOptions,
+} = require("./query-intent");
 
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
@@ -86,26 +101,98 @@ function toolDefinitions() {
     },
     {
       name: "chl_remember",
-      description: "Store a memory entry in CHL.",
+      description: "Store a memory entry in CHL. Accepts optional memoryType metadata (ephemeral, short_term, medium_term, long_term, user_profile, self_profile, knowledge, episodic). If omitted the entry is automatically classified.",
       inputSchema: {
         type: "object",
         properties: {
           input: {},
           payload: {},
-          metadata: { type: "object" },
+          metadata: {
+            type: "object",
+            properties: {
+              memoryType: { type: "string", description: "Explicit memory type." },
+              source: { type: "string", description: "Origin tag (e.g. user, ingest, consolidation)." },
+              quality: { type: "number", description: "Entry quality 0-1 (default 1)." },
+              expiresAt: { type: "number", description: "Epoch ms when the entry becomes stale." },
+            },
+            additionalProperties: true,
+          },
         },
         required: ["input"],
         additionalProperties: false,
       },
     },
     {
+      name: "chl_remember_typed",
+      description: "Store a memory entry with an explicit memory type and optional TTL. Useful for user profiles, AI self-personality, knowledge bases or time-bounded facts.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          input: {},
+          payload: {},
+          memoryType: { type: "string", description: "Memory type: ephemeral, short_term, medium_term, long_term, user_profile, self_profile, knowledge, episodic." },
+          source: { type: "string", description: "Origin tag (e.g. user, ai, ingest)." },
+          ttlSeconds: { type: "number", minimum: 1, description: "Time-to-live in seconds. Sets expiresAt if not provided." },
+          quality: { type: "number", description: "Entry quality 0-1 (default 1)." },
+          metadata: { type: "object", additionalProperties: true },
+        },
+        required: ["input", "memoryType"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "chl_recall",
-      description: "Query CHL for the nearest matching memories.",
+      description: "Query CHL for the nearest matching memories. Supports adaptive intent detection, type filtering and type-specific scoring profiles.",
       inputSchema: {
         type: "object",
         properties: {
           query: {},
           topK: { type: "number", minimum: 1 },
+          memoryType: { type: "string", description: "Restrict results to a single memory type." },
+          excludeTypes: { type: "array", items: { type: "string" }, description: "Memory types to exclude." },
+          timeWindowMs: { type: "number", description: "Only return entries newer than this many ms." },
+          minQuality: { type: "number", minimum: 0, maximum: 1, description: "Minimum entry quality." },
+          source: { type: "string", description: "Filter by source tag." },
+          intent: { type: "string", description: "Query intent override: self_reflection, user_recall, personal_preference, fact_lookup, procedural, general_chat." },
+          boostProfile: { type: "string", description: "Scoring profile override: default, user-centric, ai-centric, fact-centric, episodic, long-term, short-term." },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "chl_recall_by_type",
+      description: "Retrieve memories filtered by one or more memory types, optionally applying intent-aware boosts.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: {},
+          memoryType: { type: "string", description: "Primary memory type to include." },
+          includeTypes: { type: "array", items: { type: "string" }, description: "List of memory types to include (overrides memoryType)." },
+          excludeTypes: { type: "array", items: { type: "string" }, description: "Memory types to exclude." },
+          topK: { type: "number", minimum: 1 },
+          timeWindowMs: { type: "number" },
+          minQuality: { type: "number", minimum: 0, maximum: 1 },
+          source: { type: "string" },
+          intent: { type: "string" },
+          boostProfile: { type: "string" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "chl_recall_personalized",
+      description: "Recall memories prioritizing user profile and AI self-profile entries. Intent is auto-detected from the query, but can be overridden.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: {},
+          topK: { type: "number", minimum: 1 },
+          intent: { type: "string", description: "Override auto-detected intent." },
+          timeWindowMs: { type: "number" },
+          minQuality: { type: "number", minimum: 0, maximum: 1 },
+          includeProfiles: { type: "boolean", description: "Always include profile entries even if the query is generic (default true)." },
         },
         required: ["query"],
         additionalProperties: false,
@@ -411,6 +498,38 @@ function toolDefinitions() {
   ];
 }
 
+function buildRecallOptions(args) {
+  const options = {
+    topK: args.topK ?? 5,
+  };
+  if (args.memoryType) options.memoryType = normalizeMemoryType(args.memoryType);
+  if (Array.isArray(args.excludeTypes) && args.excludeTypes.length > 0) {
+    options.excludeTypes = args.excludeTypes.map(normalizeMemoryType).filter(Boolean);
+  }
+  if (typeof args.timeWindowMs === "number") options.timeWindowMs = args.timeWindowMs;
+  if (typeof args.minQuality === "number") options.minQuality = args.minQuality;
+  if (args.source) options.source = String(args.source);
+  if (args.intent) options.intent = String(args.intent).toLowerCase();
+  if (args.boostProfile) options.boostProfile = String(args.boostProfile);
+  return options;
+}
+
+function formatRecallResult(recall) {
+  return {
+    confidence: recall.confidence,
+    candidates: (recall.candidates ?? []).map((c) => ({
+      id: c.id ?? c.entry?.id ?? "",
+      text: c.text ?? c.entry?.text ?? "",
+      score: c.score ?? 0,
+      memoryType: c.metadata?.memoryType ?? c.entry?.memoryType ?? null,
+      source: c.metadata?.source ?? c.entry?.source ?? null,
+      quality: c.quality ?? c.metadata?.quality ?? null,
+      expiresAt: c.metadata?.expiresAt ?? c.entry?.expiresAt ?? null,
+      payload: c.payload ?? c.entry?.payload ?? null,
+    })),
+  };
+}
+
 async function callTool(context, name, args) {
   await ensureMemoryReady(context);
   const mem = context.memory;
@@ -477,20 +596,71 @@ async function callTool(context, name, args) {
       break;
     }
     case "chl_remember": {
-      mem.remember(args.input, args.payload, args.metadata);
-      result = { ok: true, action: "remembered" };
+      const entry = mem.remember(args.input, args.payload, args.metadata);
+      result = {
+        ok: true,
+        action: "remembered",
+        memoryType: entry?.memoryType ?? entry?.metadata?.memoryType ?? args.metadata?.memoryType ?? null,
+      };
+      break;
+    }
+    case "chl_remember_typed": {
+      const now = Date.now();
+      const explicitType = normalizeMemoryType(args.memoryType);
+      const metadata = {
+        ...(args.metadata || {}),
+        memoryType: explicitType,
+        source: args.source ?? args.metadata?.source ?? "",
+        quality: args.quality ?? args.metadata?.quality ?? 1,
+        createdAt: args.metadata?.createdAt ?? now,
+        expiresAt: args.metadata?.expiresAt ?? (args.ttlSeconds ? now + args.ttlSeconds * 1000 : getDefaultExpiry(explicitType)),
+      };
+      const entry = mem.remember(args.input, args.payload, metadata);
+      result = {
+        ok: true,
+        action: "remembered_typed",
+        memoryType: explicitType,
+        expiresAt: metadata.expiresAt,
+        entryId: entry?.id ?? null,
+      };
       break;
     }
     case "chl_recall": {
-      const recall = mem.recall(args.query, { topK: args.topK ?? 5 });
+      const recall = mem.recall(args.query, buildRecallOptions(args));
+      result = formatRecallResult(recall);
+      break;
+    }
+    case "chl_recall_by_type": {
+      const options = buildRecallOptions(args);
+      if (Array.isArray(args.includeTypes) && args.includeTypes.length > 0) {
+        const types = args.includeTypes.map(normalizeMemoryType).filter(Boolean);
+        options.includeTypes = types;
+        options.memoryTypes = types;
+      }
+      const recall = mem.recall(args.query, options);
+      result = formatRecallResult(recall);
+      break;
+    }
+    case "chl_recall_personalized": {
+      const intent = args.intent ? String(args.intent).toLowerCase() : detectQueryIntent(args.query);
+      const targetTypes = intentToMemoryTypes(intent);
+      const profileTypes = [MemoryType.USER_PROFILE, MemoryType.SELF_PROFILE];
+      const includeProfiles = args.includeProfiles !== false;
+      const includeTypes = includeProfiles
+        ? Array.from(new Set([...profileTypes, ...targetTypes]))
+        : targetTypes;
+      const options = {
+        ...buildRecallOptions(args),
+        includeTypes,
+        memoryTypes: includeTypes,
+        intent,
+        boostProfile: args.boostProfile || "user-centric",
+      };
+      const recall = mem.recall(args.query, options);
       result = {
-        confidence: recall.confidence,
-        candidates: (recall.candidates ?? []).map((c) => ({
-          id: c.id ?? c.entry?.id ?? "",
-          text: c.text ?? c.entry?.text ?? "",
-          score: c.score ?? 0,
-          payload: c.payload ?? c.entry?.payload ?? null,
-        })),
+        ...formatRecallResult(recall),
+        detectedIntent: intent,
+        includeTypes,
       };
       break;
     }

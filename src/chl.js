@@ -342,7 +342,16 @@ class CHL {
     }
     this.memory.clear();
     for (const entry of data.entries ?? []) {
-      this.memory.insert(entry.text ?? entry.input, entry.payload, entry.metadata);
+      const metadata = {
+        ...entry.metadata,
+        id: entry.id,
+        memoryType: entry.memoryType,
+        tier: entry.tier,
+        expiresAt: entry.expiresAt,
+        quality: entry.quality,
+        source: entry.source,
+      };
+      this.memory.insert(entry.text ?? entry.input, entry.payload, metadata);
     }
     if (data.lexicon && this._lexiconTrainer) {
       // Restaurar prototipos desde el snapshot guardado

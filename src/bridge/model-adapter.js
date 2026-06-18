@@ -39,12 +39,49 @@ const CHL_TOOLS_FOR_LLM = [
     type: "function",
     function: {
       name: "chl_recall",
-      description: "Recupera memorias relacionadas con una query.",
+      description: "Recupera memorias relacionadas con una query. Puede filtrar por tipo de memoria, intención y ventana temporal.",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string", description: "Texto de búsqueda." },
           topK: { type: "number", description: "Número máximo de resultados (default 5)." },
+          memoryType: { type: "string", description: "Restringir a un tipo: ephemeral, short_term, medium_term, long_term, user_profile, self_profile, knowledge, episodic." },
+          excludeTypes: { type: "array", items: { type: "string" }, description: "Tipos a excluir." },
+          intent: { type: "string", description: "Intención de la query: self_reflection, user_recall, personal_preference, fact_lookup, procedural, general_chat." },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "chl_remember_typed",
+      description: "Guarda un hecho con un tipo de memoria explícito (útil para perfiles de usuario, personalidad de la IA, conocimiento o hechos temporales).",
+      parameters: {
+        type: "object",
+        properties: {
+          input: { type: "string", description: "El texto a recordar." },
+          memoryType: { type: "string", description: "Tipo: ephemeral, short_term, medium_term, long_term, user_profile, self_profile, knowledge, episodic." },
+          payload: { type: "string", description: "Datos estructurados opcionales (JSON)." },
+          source: { type: "string", description: "Origen: user, ai, ingest, etc." },
+          ttlSeconds: { type: "number", description: "Tiempo de vida en segundos." },
+        },
+        required: ["input", "memoryType"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "chl_recall_personalized",
+      description: "Recupera memorias priorizando el perfil del usuario y la personalidad de la IA. Usa intención auto-detectada.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Texto de búsqueda." },
+          topK: { type: "number", description: "Número máximo de resultados (default 5)." },
+          intent: { type: "string", description: "Sobrescribir intención detectada." },
         },
         required: ["query"],
       },

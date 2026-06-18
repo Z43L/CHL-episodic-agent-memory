@@ -28,8 +28,11 @@ CHL_AUTO_REMEMBER = "smart"
 ### Memoria core
 | Herramienta | Qué hace |
 |------------|---------|
-| `chl_remember` | Guarda un hecho en memoria |
-| `chl_recall` | Busca memorias relacionadas |
+| `chl_remember` | Guarda un hecho en memoria (clasificación automática de tipo) |
+| `chl_remember_typed` | Guarda un hecho con tipo explícito y TTL opcional |
+| `chl_recall` | Busca memorias relacionadas con intención y filtros de tipo |
+| `chl_recall_by_type` | Busca memorias filtradas por uno o varios tipos |
+| `chl_recall_personalized` | Busca priorizando perfil del usuario y personalidad de la IA |
 | `chl_infer` | Sintetiza la mejor respuesta |
 | `chl_think` | Traza de pensamiento con evidencias |
 | `chl_plan` | Plan paso a paso |
@@ -69,6 +72,74 @@ CHL_AUTO_REMEMBER = "smart"
 | `chl_lexicon` | Conceptos aprendidos |
 | `chl_bucket_stats` | Estadísticas de buckets |
 | `chl_clear` | Limpiar memoria |
+
+## Uso de memorias tipadas
+
+CHL distingue entre distintos tipos de memoria. Cuando guardas algo, el motor intenta clasificarlo automáticamente, pero puedes forzar el tipo con `chl_remember_typed`:
+
+```json
+// Perfil del usuario
+{
+  "input": "Me llamo David Moreno y trabajo en CHL",
+  "memoryType": "user_profile",
+  "source": "user"
+}
+```
+
+```json
+// Personalidad de la IA
+{
+  "input": "Responde siempre con tono profesional y conciso",
+  "memoryType": "self_profile",
+  "source": "user"
+}
+```
+
+```json
+// Conocimiento técnico
+{
+  "input": "Redis usa el puerto 6379 por defecto",
+  "memoryType": "knowledge",
+  "source": "docs"
+}
+```
+
+```json
+// Contexto que expira en 5 minutos
+{
+  "input": "Estamos depurando el servicio de pagos",
+  "memoryType": "ephemeral",
+  "ttlSeconds": 300
+}
+```
+
+Para recuperar memoria de forma dirigida:
+
+```json
+// Perfil del usuario
+{
+  "query": "cómo me llamo",
+  "memoryType": "user_profile"
+}
+```
+
+```json
+// Personalidad de la IA
+{
+  "query": "quién eres",
+  "memoryType": "self_profile"
+}
+```
+
+```json
+// Búsqueda personalizada (prioriza perfil + personalidad)
+{
+  "query": "qué me gusta y cómo respondes",
+  "topK": 5
+}
+```
+
+El contexto que se envía al modelo grande se organiza en secciones por tipo, con el perfil del usuario y la personalidad de la IA en primer lugar.
 
 ## Para reinstalar en otra máquina
 

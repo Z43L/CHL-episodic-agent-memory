@@ -71,6 +71,9 @@ Current modules:
 - `src/memory.js`
 - `src/graph.js`
 - `src/consolidation.js`
+- `src/memory-types.js`
+- `src/memory-classifier.js`
+- `src/query-intent.js`
 
 Target responsibilities:
 
@@ -79,9 +82,17 @@ Target responsibilities:
 - keep source, recency, quality, and confidence
 - track contradictions instead of overwriting them silently
 
+Implemented:
+
+- explicit memory taxonomy: `ephemeral`, `short_term`, `medium_term`, `long_term`, `user_profile`, `self_profile`, `knowledge`, `episodic`
+- type-specific TTLs, eviction priority, and scoring profiles
+- automatic classification fallback plus explicit typed storage
+- query intent detection and intent-to-type routing
+- adaptive scoring with temporal decay, type boosts, and z-score normalization
+- type- and source-based indexing and filtering in both JS and native engines
+
 Next work:
 
-- add explicit memory types
 - add rule decay and reinforcement
 - add conflict resolution policies
 
